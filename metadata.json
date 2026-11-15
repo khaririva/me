@@ -1,0 +1,6 @@
+{
+  "name": "PustakaMac — Pembaca EPUB & Terjemahan AI",
+  "description": "Aplikasi baca EPUB untuk MacBook dengan terjemahan AI kontekstual, mode bilingual, pustaka luring, dan kamus kosakata pribadi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

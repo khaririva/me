@@ -1,0 +1,2109 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aplikasi Baca Pribadi — Pembaca EPUB & Terjemahan AI</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Fonts: Inter, Lora, Merriweather, Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,600;1,400&family=Merriweather:ital,wght@0,300;0,400;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- JSZip & EPUB.js via CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    :root {
+      --bg-app: #f8fafc;
+      --bg-surface: #ffffff;
+      --bg-reader: #ffffff;
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --border-color: #e2e8f0;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+    }
+
+    body.theme-sepia {
+      --bg-app: #efe6d5;
+      --bg-surface: #f7f0e2;
+      --bg-reader: #fbf6ec;
+      --text-primary: #3b2f23;
+      --text-secondary: #6e5c49;
+      --border-color: #dfd2bc;
+      --accent: #b45309;
+      --accent-soft: #fef3c7;
+    }
+
+    body.theme-dark {
+      --bg-app: #090d16;
+      --bg-surface: #111827;
+      --bg-reader: #0f172a;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --border-color: #1e293b;
+      --accent: #3b82f6;
+      --accent-soft: #1e293b;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+      background-color: var(--bg-app);
+      color: var(--text-primary);
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    .surface-card {
+      background-color: var(--bg-surface);
+      border-color: var(--border-color);
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    .reader-container {
+      background-color: var(--bg-reader);
+      border-color: var(--border-color);
+      transition: background-color 0.25s ease, border-color 0.25s ease;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.4);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.7);
+    }
+
+    /* EPUB iframe wrapper adjustments */
+    #epub-viewer iframe {
+      border: none !important;
+      max-width: 100% !important;
+    }
+
+    @keyframes pulseSubtle {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.55; }
+    }
+    .animate-pulse-subtle {
+      animation: pulseSubtle 1.8s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="theme-light min-h-screen flex flex-col overflow-x-hidden selection:bg-blue-500/20">
+
+  <!-- Toast Notification -->
+  <div id="toast-container" class="fixed bottom-20 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- Top Navigation Header -->
+  <header class="surface-card border-b sticky top-0 z-30 px-3 sm:px-6 h-16 flex items-center justify-between gap-2 shadow-sm">
+    <!-- Left: Sidebar Toggle & Brand -->
+    <div class="flex items-center gap-2 sm:gap-3 min-w-0">
+      <button id="btn-toggle-sidebar" title="Daftar Isi & Simpanan" class="p-2.5 rounded-xl hover:bg-slate-500/10 active:scale-95 transition flex items-center gap-2">
+        <i data-lucide="panel-left" class="w-5 h-5"></i>
+        <span class="hidden md:inline text-sm font-medium">Daftar Isi</span>
+      </button>
+
+      <div class="h-5 w-px bg-slate-300 dark:bg-slate-700 hidden sm:block"></div>
+
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+          <i data-lucide="book-open" class="w-5 h-5"></i>
+        </div>
+        <div class="min-w-0">
+          <h1 id="book-title-display" class="text-sm sm:text-base font-bold truncate leading-tight">
+            Aplikasi Baca Pribadi
+          </h1>
+          <p id="book-chapter-display" class="text-xs opacity-70 truncate">
+            Buku Contoh Bawaan
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center/Right: Reading Mode Segmented Toggle -->
+    <div class="hidden xl:flex items-center p-1 rounded-xl border surface-card bg-slate-500/5 text-xs font-semibold shrink-0" title="Mode Tampilan Teks Buku">
+      <button data-read-mode="original" class="read-mode-btn px-2.5 py-1.5 rounded-lg bg-blue-600 text-white shadow-xs transition">
+        Asli
+      </button>
+      <button data-read-mode="translated" class="read-mode-btn px-2.5 py-1.5 rounded-lg opacity-75 hover:opacity-100 transition">
+        Terjemahan Penuh
+      </button>
+      <button data-read-mode="bilingual" class="read-mode-btn px-2.5 py-1.5 rounded-lg opacity-75 hover:opacity-100 transition">
+        Bilingual
+      </button>
+    </div>
+
+    <!-- Right: Action Buttons -->
+    <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+      <!-- Target Translation Language -->
+      <div class="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border surface-card text-xs">
+        <i data-lucide="languages" class="w-4 h-4 text-blue-500"></i>
+        <select id="select-target-lang" class="bg-transparent font-semibold focus:outline-none cursor-pointer">
+          <option value="Bahasa Indonesia" selected>Indonesia</option>
+          <option value="English">Inggris (English)</option>
+          <option value="Japanese (日本語)">Jepang (日本語)</option>
+          <option value="Korean (한국어)">Korea (한국어)</option>
+          <option value="Arabic (العربية)">Arab (العربية)</option>
+        </select>
+      </div>
+
+      <!-- Full Book Translation Trigger -->
+      <button id="btn-full-book-translate" title="Terjemahkan Seluruh Bab Buku" class="px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 shadow-sm active:scale-95 transition">
+        <i data-lucide="book-a" class="w-4 h-4"></i>
+        <span class="hidden md:inline">Terjemahkan Buku</span>
+        <span class="md:hidden">Semua</span>
+      </button>
+
+      <!-- Translate Current Page/Chapter -->
+      <button id="btn-translate-page" title="Terjemahkan Halaman/Bab Aktif" class="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 shadow-sm active:scale-95 transition">
+        <i data-lucide="sparkles" class="w-4 h-4"></i>
+        <span class="hidden sm:inline">Halaman Ini</span>
+      </button>
+
+      <!-- Bookmark Button -->
+      <button id="btn-add-bookmark" title="Tandai Halaman Ini" class="p-2.5 rounded-xl border surface-card hover:bg-slate-500/10 active:scale-95 transition">
+        <i data-lucide="bookmark" class="w-4 h-4"></i>
+      </button>
+
+      <!-- Typography & Theme Settings -->
+      <button id="btn-toggle-settings" title="Pengaturan Tampilan & Mode Baca" class="p-2.5 rounded-xl border surface-card hover:bg-slate-500/10 active:scale-95 transition">
+        <i data-lucide="type" class="w-4 h-4"></i>
+      </button>
+
+      <!-- Upload EPUB Button -->
+      <label for="epub-upload-input" class="px-3 py-2 rounded-xl border surface-card hover:bg-slate-500/10 text-xs sm:text-sm font-semibold flex items-center gap-1.5 cursor-pointer active:scale-95 transition">
+        <i data-lucide="upload" class="w-4 h-4 text-blue-500"></i>
+        <span class="hidden md:inline">Unggah EPUB</span>
+      </label>
+      <input type="file" id="epub-upload-input" accept=".epub,application/epub+zip" class="hidden" />
+    </div>
+  </header>
+
+  <!-- Full-Book Translation Progress & Control Banner -->
+  <div id="full-translate-bar" class="hidden surface-card border-b px-4 py-2.5 z-20 shadow-xs">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+      <div class="flex-1 min-w-0 space-y-1.5">
+        <div class="flex items-center justify-between gap-2 text-xs">
+          <div class="flex items-center gap-2 min-w-0">
+            <span id="full-translate-spinner" class="w-3.5 h-3.5 border-2 border-amber-600 border-t-transparent rounded-full animate-spin shrink-0"></span>
+            <span id="full-translate-status" class="font-bold truncate">Menyiapkan penerjemahan seluruh buku...</span>
+          </div>
+          <span id="full-translate-pct" class="font-extrabold text-amber-600 dark:text-amber-400 shrink-0">0%</span>
+        </div>
+        <div class="w-full h-2 rounded-full bg-slate-500/15 overflow-hidden">
+          <div id="full-translate-progress" class="h-full bg-gradient-to-r from-amber-500 to-blue-600 transition-all duration-300 rounded-full" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+        <button id="btn-pause-resume-full" class="px-3 py-1.5 rounded-xl border surface-card hover:bg-slate-500/10 text-xs font-semibold flex items-center gap-1.5 transition">
+          <i data-lucide="pause" class="w-3.5 h-3.5 text-amber-600"></i>
+          <span>Jeda</span>
+        </button>
+        <button id="btn-download-translated-book" class="hidden px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 transition">
+          <i data-lucide="download" class="w-3.5 h-3.5"></i>
+          <span>Unduh Terjemahan</span>
+        </button>
+        <button id="btn-cancel-full" class="px-2.5 py-1.5 rounded-xl border border-rose-500/30 text-rose-600 hover:bg-rose-500/10 text-xs font-semibold flex items-center gap-1 transition">
+          <i data-lucide="x" class="w-3.5 h-3.5"></i>
+          <span>Tutup</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Popover Drawer -->
+  <div id="settings-panel" class="hidden fixed right-3 sm:right-6 top-20 z-40 w-80 max-w-[calc(100vw-1.5rem)] surface-card border rounded-2xl shadow-xl p-4 space-y-4">
+    <div class="flex items-center justify-between border-b pb-2.5" style="border-color: var(--border-color);">
+      <span class="font-bold text-sm flex items-center gap-2">
+        <i data-lucide="sliders-horizontal" class="w-4 h-4 text-blue-500"></i>
+        Tampilan & Mode Terjemahan
+      </span>
+      <button id="btn-close-settings" class="p-1 rounded-lg hover:bg-slate-500/10">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+    </div>
+
+    <!-- Reading Mode Selector (Accessible on All Screen Sizes) -->
+    <div class="space-y-1.5">
+      <label class="text-xs font-semibold opacity-75">Mode Tampilan Teks Buku</label>
+      <div class="grid grid-cols-3 gap-1.5">
+        <button data-read-mode="original" class="read-mode-btn py-2 px-2 rounded-xl border text-xs font-semibold bg-blue-600 text-white border-blue-600 transition">
+          Asli
+        </button>
+        <button data-read-mode="translated" class="read-mode-btn py-2 px-2 rounded-xl border text-xs font-semibold transition" style="border-color: var(--border-color);">
+          Terjemahan
+        </button>
+        <button data-read-mode="bilingual" class="read-mode-btn py-2 px-2 rounded-xl border text-xs font-semibold transition" style="border-color: var(--border-color);">
+          Bilingual
+        </button>
+      </div>
+      <p class="text-[11px] opacity-65 leading-snug">
+        Saat mode Terjemahan/Bilingual aktif, bab baru akan diterjemahkan otomatis saat halaman dibalik.
+      </p>
+    </div>
+
+    <!-- Theme Selector -->
+    <div class="space-y-1.5">
+      <label class="text-xs font-semibold opacity-75">Tema Warna</label>
+      <div class="grid grid-cols-3 gap-2">
+        <button data-theme="light" class="theme-btn py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 bg-white text-slate-900 border-slate-300 ring-2 ring-blue-500">
+          <i data-lucide="sun" class="w-3.5 h-3.5"></i> Terang
+        </button>
+        <button data-theme="sepia" class="theme-btn py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 bg-[#fbf6ec] text-[#3b2f23] border-[#dfd2bc]">
+          <i data-lucide="coffee" class="w-3.5 h-3.5"></i> Sepia
+        </button>
+        <button data-theme="dark" class="theme-btn py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 bg-slate-900 text-slate-100 border-slate-700">
+          <i data-lucide="moon" class="w-3.5 h-3.5"></i> Gelap
+        </button>
+      </div>
+    </div>
+
+    <!-- Font Family -->
+    <div class="space-y-1.5">
+      <label class="text-xs font-semibold opacity-75">Jenis Huruf</label>
+      <div class="grid grid-cols-2 gap-2">
+        <button data-font="serif" class="font-btn py-2 px-3 rounded-xl border text-xs font-semibold font-serif ring-2 ring-blue-500" style="border-color: var(--border-color);">
+          Serif (Klasik)
+        </button>
+        <button data-font="sans" class="font-btn py-2 px-3 rounded-xl border text-xs font-semibold font-sans" style="border-color: var(--border-color);">
+          Sans-Serif (Modern)
+        </button>
+      </div>
+    </div>
+
+    <!-- Font Size -->
+    <div class="space-y-1.5">
+      <div class="flex justify-between text-xs">
+        <span class="font-semibold opacity-75">Ukuran Huruf</span>
+        <span id="font-size-label" class="font-bold text-blue-500">100%</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-font-dec" class="flex-1 py-1.5 rounded-xl border hover:bg-slate-500/10 font-bold text-sm" style="border-color: var(--border-color);">A-</button>
+        <button id="btn-font-reset" class="px-3 py-1.5 rounded-xl border hover:bg-slate-500/10 text-xs font-medium" style="border-color: var(--border-color);">Normal</button>
+        <button id="btn-font-inc" class="flex-1 py-1.5 rounded-xl border hover:bg-slate-500/10 font-bold text-sm" style="border-color: var(--border-color);">A+</button>
+      </div>
+    </div>
+
+    <!-- Line Height -->
+    <div class="space-y-1.5">
+      <div class="flex justify-between text-xs">
+        <span class="font-semibold opacity-75">Spasi Baris</span>
+        <span id="line-height-label" class="font-bold text-blue-500">1.75</span>
+      </div>
+      <input id="range-line-height" type="range" min="1.3" max="2.3" step="0.05" value="1.75" class="w-full accent-blue-600 cursor-pointer" />
+    </div>
+
+    <!-- Full Book Translation Action inside Settings -->
+    <div class="pt-2 border-t space-y-2" style="border-color: var(--border-color);">
+      <div class="lg:hidden space-y-1">
+        <label class="text-xs font-semibold opacity-75">Bahasa Target Terjemahan</label>
+        <select id="select-target-lang-mobile" class="w-full p-2 rounded-xl border surface-card text-xs font-semibold">
+          <option value="Bahasa Indonesia" selected>Bahasa Indonesia</option>
+          <option value="English">Inggris (English)</option>
+          <option value="Japanese (日本語)">Jepang (日本語)</option>
+          <option value="Korean (한국어)">Korea (한국어)</option>
+          <option value="Arabic (العربية)">Arab (العربية)</option>
+        </select>
+      </div>
+
+      <button id="btn-settings-translate-all" class="w-full py-2.5 px-3 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs transition">
+        <i data-lucide="book-a" class="w-4 h-4"></i>
+        Terjemahkan Seluruh Buku Sekarang
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Workspace -->
+  <div class="flex-1 flex relative overflow-hidden">
+    <!-- Backdrop for Mobile Sidebar -->
+    <div id="sidebar-backdrop" class="hidden fixed inset-0 bg-black/40 backdrop-blur-xs z-30 lg:hidden"></div>
+
+    <!-- Left Drawer: Daftar Isi, Penanda & Kosakata -->
+    <aside id="left-sidebar" class="fixed lg:static inset-y-0 left-0 z-40 w-80 max-w-[85vw] surface-card border-r flex flex-col transform -translate-x-full lg:translate-x-0 transition-transform duration-300 ease-out">
+      <!-- Sidebar Tabs -->
+      <div class="p-3 border-b flex items-center justify-between gap-1" style="border-color: var(--border-color);">
+        <div class="grid grid-cols-3 gap-1 w-full p-1 rounded-xl bg-slate-500/10 text-xs font-semibold">
+          <button data-tab="toc" class="sidebar-tab py-1.5 px-2 rounded-lg bg-blue-600 text-white shadow-xs transition">
+            Daftar Isi
+          </button>
+          <button data-tab="bookmarks" class="sidebar-tab py-1.5 px-2 rounded-lg opacity-75 hover:opacity-100 transition">
+            Penanda
+          </button>
+          <button data-tab="vocab" class="sidebar-tab py-1.5 px-2 rounded-lg opacity-75 hover:opacity-100 transition">
+            Kosakata
+          </button>
+        </div>
+        <button id="btn-close-sidebar" class="lg:hidden p-2 rounded-lg hover:bg-slate-500/10 ml-1">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Tab Content: Daftar Isi (TOC) -->
+      <div id="tab-content-toc" class="sidebar-panel flex-1 overflow-y-auto p-3 space-y-1">
+        <div class="text-xs font-semibold uppercase tracking-wider opacity-60 px-2 pb-2">Bab & Bagian Buku</div>
+        <ul id="toc-list" class="space-y-1 text-sm"></ul>
+      </div>
+
+      <!-- Tab Content: Penanda (Bookmarks) -->
+      <div id="tab-content-bookmarks" class="sidebar-panel hidden flex-1 overflow-y-auto p-3 space-y-2">
+        <div class="flex items-center justify-between px-1">
+          <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Halaman Ditandai</span>
+          <span id="bookmark-count" class="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-500">0</span>
+        </div>
+        <div id="bookmarks-list" class="space-y-2 text-sm"></div>
+      </div>
+
+      <!-- Tab Content: Kosakata Tersimpan (Vocabulary) -->
+      <div id="tab-content-vocab" class="sidebar-panel hidden flex-1 overflow-y-auto p-3 space-y-2">
+        <div class="flex items-center justify-between px-1">
+          <span class="text-xs font-semibold uppercase tracking-wider opacity-60">Kamus Pribadi</span>
+          <span id="vocab-count" class="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600">0</span>
+        </div>
+        <div id="vocab-list" class="space-y-2 text-sm"></div>
+      </div>
+
+      <!-- Bottom Quick Action: Load Sample Book -->
+      <div class="p-3 border-t text-xs" style="border-color: var(--border-color);">
+        <button id="btn-load-sample" class="w-full py-2 px-3 rounded-xl border surface-card hover:bg-slate-500/10 font-semibold flex items-center justify-center gap-2 transition">
+          <i data-lucide="book-marked" class="w-4 h-4 text-blue-500"></i>
+          Muat Buku Contoh Bawaan
+        </button>
+      </div>
+    </aside>
+
+    <!-- Center & Right Split: Reader + AI Translation Panel -->
+    <main class="flex-1 flex flex-col lg:flex-row min-w-0 relative">
+      <!-- Reader Column -->
+      <div class="flex-1 flex flex-col min-w-0 relative">
+        <!-- Quick Instruction & Mobile Mode Bar -->
+        <div id="hint-banner" class="px-4 py-2 text-xs bg-blue-500/10 border-b flex flex-wrap items-center justify-between gap-2" style="border-color: var(--border-color);">
+          <div class="flex items-center gap-2 min-w-0">
+            <i data-lucide="sparkles" class="w-4 h-4 text-blue-500 shrink-0"></i>
+            <span class="truncate"><strong>Mode Baca:</strong> Pilih <em>Terjemahan</em> / <em>Bilingual</em> atau klik <strong>Terjemahkan Buku</strong> untuk menerjemahkan seluruh bab.</span>
+          </div>
+          <div class="flex items-center gap-1.5 shrink-0">
+            <div class="flex xl:hidden items-center p-0.5 rounded-lg border surface-card text-[11px] font-semibold">
+              <button data-read-mode="original" class="read-mode-btn px-2 py-0.5 rounded-md bg-blue-600 text-white">Asli</button>
+              <button data-read-mode="translated" class="read-mode-btn px-2 py-0.5 rounded-md opacity-75">Terjemahan</button>
+              <button data-read-mode="bilingual" class="read-mode-btn px-2 py-0.5 rounded-md opacity-75">Bilingual</button>
+            </div>
+            <button id="btn-dismiss-hint" class="p-1 rounded hover:bg-slate-500/10 shrink-0">
+              <i data-lucide="x" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Reader Stage -->
+        <div id="reader-wrapper" class="flex-1 relative flex items-center justify-center p-2 sm:p-5 overflow-hidden">
+          <!-- Loading Overlay -->
+          <div id="reader-loader" class="hidden absolute inset-0 z-20 flex flex-col items-center justify-center bg-inherit backdrop-blur-xs gap-3">
+            <div class="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+            <p id="reader-loader-text" class="text-sm font-semibold animate-pulse">Memuat isi buku EPUB...</p>
+          </div>
+
+          <!-- EPUB Viewer Container -->
+          <div id="epub-viewer" class="reader-container w-full max-w-4xl h-[calc(100vh-13.5rem)] sm:h-[calc(100vh-14rem)] rounded-2xl border shadow-sm overflow-hidden relative"></div>
+
+          <!-- Floating Selection Popover -->
+          <div id="selection-popover" class="hidden fixed z-50 surface-card border rounded-2xl shadow-2xl p-1.5 flex items-center gap-1 transform -translate-x-1/2">
+            <button id="btn-pop-translate" class="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center gap-1.5 transition">
+              <i data-lucide="languages" class="w-3.5 h-3.5"></i>
+              Terjemahkan
+            </button>
+            <button id="btn-pop-save-vocab" class="px-3 py-1.5 rounded-xl hover:bg-slate-500/10 text-xs font-semibold flex items-center gap-1.5 transition">
+              <i data-lucide="bookmark-plus" class="w-3.5 h-3.5 text-emerald-500"></i>
+              Simpan Kosakata
+            </button>
+            <button id="btn-pop-close" class="p-1.5 rounded-xl hover:bg-slate-500/10 opacity-70">
+              <i data-lucide="x" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Bottom Navigation & Progress Bar -->
+        <footer class="surface-card border-t px-4 py-3 flex flex-col gap-2">
+          <!-- Progress Bar -->
+          <div class="flex items-center gap-3">
+            <span id="progress-percent" class="text-xs font-bold w-10 text-right opacity-80">0%</span>
+            <input id="progress-slider" type="range" min="0" max="100" value="0" class="flex-1 h-1.5 rounded-lg accent-blue-600 cursor-pointer" />
+            <span id="page-location-label" class="text-xs opacity-70 hidden sm:inline">Bab 1</span>
+          </div>
+
+          <!-- Chapter / Page Controls -->
+          <div class="flex items-center justify-between gap-2">
+            <button id="btn-prev-page" class="px-4 py-2 rounded-xl border surface-card hover:bg-slate-500/10 text-xs sm:text-sm font-semibold flex items-center gap-1.5 active:scale-95 transition">
+              <i data-lucide="chevron-left" class="w-4 h-4"></i>
+              Sebelumnya
+            </button>
+
+            <div class="text-xs opacity-70 text-center hidden md:block">
+              Gunakan tombol panah <kbd class="px-1.5 py-0.5 rounded border text-[11px]">←</kbd> / <kbd class="px-1.5 py-0.5 rounded border text-[11px]">→</kbd> atau geser layar
+            </div>
+
+            <button id="btn-next-page" class="px-4 py-2 rounded-xl border surface-card hover:bg-slate-500/10 text-xs sm:text-sm font-semibold flex items-center gap-1.5 active:scale-95 transition">
+              Selanjutnya
+              <i data-lucide="chevron-right" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </footer>
+      </div>
+
+      <!-- AI Translation Side/Bottom Drawer -->
+      <section id="translation-drawer" class="hidden fixed inset-x-0 bottom-0 lg:static lg:inset-auto z-40 lg:w-[26rem] xl:w-[30rem] max-h-[75vh] lg:max-h-none surface-card border-t lg:border-t-0 lg:border-l rounded-t-3xl lg:rounded-none shadow-2xl lg:shadow-none flex flex-col">
+        <!-- Drawer Header -->
+        <div class="p-4 border-b flex items-center justify-between gap-2" style="border-color: var(--border-color);">
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-8 rounded-xl bg-blue-600/15 text-blue-600 flex items-center justify-center">
+              <i data-lucide="sparkles" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <h2 class="text-sm font-bold leading-tight">Terjemahan Kontekstual AI</h2>
+              <p id="translation-subtitle" class="text-[11px] opacity-70">Ke Bahasa Indonesia</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-1">
+            <button id="btn-copy-translation" title="Salin Terjemahan" class="p-2 rounded-xl hover:bg-slate-500/10 transition">
+              <i data-lucide="copy" class="w-4 h-4"></i>
+            </button>
+            <button id="btn-close-translation" title="Tutup Panel" class="p-2 rounded-xl hover:bg-slate-500/10 transition">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Drawer Body -->
+        <div id="translation-body" class="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+          <!-- Source Text Box -->
+          <div id="source-text-card" class="p-3.5 rounded-2xl border bg-slate-500/5 space-y-1.5" style="border-color: var(--border-color);">
+            <div class="flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider opacity-60">
+              <span>Teks Asli</span>
+              <button id="btn-save-from-drawer" class="text-emerald-600 hover:underline flex items-center gap-1 normal-case font-semibold">
+                <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i> Simpan Kosakata
+              </button>
+            </div>
+            <p id="source-text-content" class="leading-relaxed italic opacity-90 max-h-36 overflow-y-auto"></p>
+          </div>
+
+          <!-- Translation Result Box -->
+          <div class="space-y-2">
+            <div class="text-[11px] font-semibold uppercase tracking-wider opacity-60 flex items-center justify-between">
+              <span>Hasil Terjemahan & Analisis</span>
+              <span id="translation-badge" class="px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-600 text-[10px]">Gemini AI</span>
+            </div>
+
+            <!-- Loading State -->
+            <div id="translation-loading" class="hidden p-6 rounded-2xl border text-center space-y-3" style="border-color: var(--border-color);">
+              <div class="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+              <p class="text-xs font-medium animate-pulse-subtle">Sedang menerjemahkan dengan memperhatikan konteks sastra...</p>
+            </div>
+
+            <!-- Output State -->
+            <div id="translation-output" class="p-4 rounded-2xl border surface-card space-y-3 leading-relaxed shadow-xs" style="border-color: var(--border-color);">
+              <p class="opacity-70 text-xs">Pilih teks di dalam buku atau klik "Terjemahkan Halaman Ini" untuk melihat terjemahan.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    /**
+     * =========================================================================
+     * APLIKASI BACA PRIBADI - Pembaca EPUB & Terjemahan Seluruh Buku AI
+     * =========================================================================
+     */
+
+    // Konfigurasi Gemini API (Runtime environment menyuntikkan API key secara otomatis)
+    const apiKey = "";
+    const GEMINI_MODEL = "gemini-3-flash-preview";
+
+    // State Aplikasi
+    const state = {
+      book: null,
+      rendition: null,
+      currentBookId: "sample-book-v1",
+      currentBookTitle: "Filosofi & Petualangan Bahasa",
+      currentChapterTitle: "Bab 1: Seni Membaca",
+      currentCfi: null,
+      currentSpineHref: null,
+      theme: localStorage.getItem("reader_theme") || "light",
+      fontFamily: localStorage.getItem("reader_font") || "serif",
+      fontSize: parseInt(localStorage.getItem("reader_font_size") || "100", 10),
+      lineHeight: parseFloat(localStorage.getItem("reader_line_height") || "1.75"),
+      targetLang: localStorage.getItem("reader_target_lang") || "Bahasa Indonesia",
+      readingMode: localStorage.getItem("reader_reading_mode") || "original", // 'original' | 'translated' | 'bilingual'
+      selectedText: "",
+      lastTranslationResult: "",
+      bookmarks: JSON.parse(localStorage.getItem("reader_bookmarks") || "[]"),
+      vocabList: JSON.parse(localStorage.getItem("reader_vocab") || "[]"),
+      locationsReady: false,
+
+      // Cache & Batch Full-Book Translation State
+      chapterTranslations: {}, // { [spineHref]: { title: string, paragraphs: [{ orig, trans }] } }
+      activeSectionTranslating: null,
+      batchJob: {
+        running: false,
+        paused: false,
+        cancelled: false,
+        total: 0,
+        completed: 0,
+        currentTitle: "",
+      },
+    };
+
+    // Referensi Elemen DOM
+    const el = {
+      body: document.body,
+      viewer: document.getElementById("epub-viewer"),
+      loader: document.getElementById("reader-loader"),
+      loaderText: document.getElementById("reader-loader-text"),
+      bookTitle: document.getElementById("book-title-display"),
+      chapterTitle: document.getElementById("book-chapter-display"),
+      tocList: document.getElementById("toc-list"),
+      bookmarksList: document.getElementById("bookmarks-list"),
+      bookmarkCount: document.getElementById("bookmark-count"),
+      vocabList: document.getElementById("vocab-list"),
+      vocabCount: document.getElementById("vocab-count"),
+      sidebar: document.getElementById("left-sidebar"),
+      sidebarBackdrop: document.getElementById("sidebar-backdrop"),
+      settingsPanel: document.getElementById("settings-panel"),
+      fontSizeLabel: document.getElementById("font-size-label"),
+      lineHeightLabel: document.getElementById("line-height-label"),
+      rangeLineHeight: document.getElementById("range-line-height"),
+      selectTargetLang: document.getElementById("select-target-lang"),
+      selectTargetLangMobile: document.getElementById("select-target-lang-mobile"),
+      selectionPopover: document.getElementById("selection-popover"),
+      translationDrawer: document.getElementById("translation-drawer"),
+      translationSubtitle: document.getElementById("translation-subtitle"),
+      sourceTextContent: document.getElementById("source-text-content"),
+      translationLoading: document.getElementById("translation-loading"),
+      translationOutput: document.getElementById("translation-output"),
+      progressSlider: document.getElementById("progress-slider"),
+      progressPercent: document.getElementById("progress-percent"),
+      pageLocationLabel: document.getElementById("page-location-label"),
+      toastContainer: document.getElementById("toast-container"),
+
+      // Full Translation UI
+      fullTranslateBar: document.getElementById("full-translate-bar"),
+      fullTranslateSpinner: document.getElementById("full-translate-spinner"),
+      fullTranslateStatus: document.getElementById("full-translate-status"),
+      fullTranslatePct: document.getElementById("full-translate-pct"),
+      fullTranslateProgress: document.getElementById("full-translate-progress"),
+      btnPauseResumeFull: document.getElementById("btn-pause-resume-full"),
+      btnDownloadTranslatedBook: document.getElementById("btn-download-translated-book"),
+    };
+
+    /**
+     * =========================================================================
+     * INDEXEDDB CACHE MANAGER (Penyimpanan Terjemahan Seluruh Buku)
+     * =========================================================================
+     */
+    const BookTranslationDB = {
+      dbName: "EpubReaderTranslationsDB",
+      storeName: "book_translations",
+      version: 1,
+
+      open() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(this.dbName, this.version);
+          request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(this.storeName)) {
+              db.createObjectStore(this.storeName, { keyPath: "cacheKey" });
+            }
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      },
+
+      makeKey(bookId, targetLang) {
+        return `${bookId}::${targetLang}`;
+      },
+
+      async getBookCache(bookId, targetLang) {
+        try {
+          const db = await this.open();
+          return new Promise((resolve) => {
+            const tx = db.transaction(this.storeName, "readonly");
+            const store = tx.objectStore(this.storeName);
+            const req = store.get(this.makeKey(bookId, targetLang));
+            req.onsuccess = () => resolve(req.result?.chapters || {});
+            req.onerror = () => resolve({});
+          });
+        } catch (e) {
+          return {};
+        }
+      },
+
+      async saveBookCache(bookId, targetLang, bookTitle, chaptersMap) {
+        try {
+          const db = await this.open();
+          return new Promise((resolve) => {
+            const tx = db.transaction(this.storeName, "readwrite");
+            const store = tx.objectStore(this.storeName);
+            store.put({
+              cacheKey: this.makeKey(bookId, targetLang),
+              bookId,
+              targetLang,
+              bookTitle,
+              updatedAt: Date.now(),
+              chapters: chaptersMap,
+            });
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          });
+        } catch (e) {
+          return false;
+        }
+      },
+    };
+
+    /**
+     * Menampilkan Notifikasi Toast (pengganti alert)
+     */
+    function showToast(message, type = "info") {
+      const toast = document.createElement("div");
+      const colors = {
+        info: "bg-slate-900 text-white dark:bg-slate-800 border-slate-700",
+        success: "bg-emerald-600 text-white border-emerald-500",
+        error: "bg-rose-600 text-white border-rose-500",
+      };
+      toast.className = `pointer-events-auto px-4 py-2.5 rounded-xl border shadow-lg text-xs sm:text-sm font-medium flex items-center gap-2 transition-all duration-300 transform translate-y-2 opacity-0 ${colors[type] || colors.info}`;
+      toast.innerHTML = `<span>${escapeHtml(message)}</span>`;
+      el.toastContainer.appendChild(toast);
+
+      requestAnimationFrame(() => {
+        toast.classList.remove("translate-y-2", "opacity-0");
+      });
+
+      setTimeout(() => {
+        toast.classList.add("opacity-0", "translate-y-2");
+        setTimeout(() => toast.remove(), 300);
+      }, 3200);
+    }
+
+    function escapeHtml(str) {
+      if (!str) return "";
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    /**
+     * Membuat file EPUB contoh secara dinamis di memori menggunakan JSZip
+     * sehingga pengguna bisa langsung mencoba aplikasi tanpa harus mengunggah file terlebih dahulu.
+     */
+    async function createSampleEpubBlob() {
+      const zip = new JSZip();
+
+      // 1. mimetype (harus tidak dikompresi)
+      zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+
+      // 2. META-INF/container.xml
+      zip.folder("META-INF").file(
+        "container.xml",
+        `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`
+      );
+
+      const oebps = zip.folder("OEBPS");
+
+      // 3. content.opf
+      oebps.file(
+        "content.opf",
+        `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>The Art of Quiet Reading (Buku Contoh)</dc:title>
+    <dc:creator opf:role="aut">Eleanor Vance</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier id="BookId">urn:uuid:12345678-1234-1234-1234-123456789012</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="chap1" href="chap1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chap2" href="chap2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chap3" href="chap3.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="chap1"/>
+    <itemref idref="chap2"/>
+    <itemref idref="chap3"/>
+  </spine>
+</package>`
+      );
+
+      // 4. toc.ncx
+      oebps.file(
+        "toc.ncx",
+        `<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="urn:uuid:12345678-1234-1234-1234-123456789012"/>
+  </head>
+  <docTitle><text>The Art of Quiet Reading</text></docTitle>
+  <navMap>
+    <navPoint id="navPoint-1" playOrder="1">
+      <navLabel><text>Chapter 1: Whispers of Ink</text></navLabel>
+      <content src="chap1.xhtml"/>
+    </navPoint>
+    <navPoint id="navPoint-2" playOrder="2">
+      <navLabel><text>Chapter 2: Bridges Across Languages</text></navLabel>
+      <content src="chap2.xhtml"/>
+    </navPoint>
+    <navPoint id="navPoint-3" playOrder="3">
+      <navLabel><text>Chapter 3: The Sanctuary of Solitude</text></navLabel>
+      <content src="chap3.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>`
+      );
+
+      // 5. Chapters
+      oebps.file(
+        "chap1.xhtml",
+        `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 1: Whispers of Ink</title></head>
+<body>
+  <h1>Chapter 1: Whispers of Ink</h1>
+  <p>In an era defined by fleeting notifications and ephemeral digital noise, sitting down with a thoughtful book becomes a quiet act of rebellion. Every sentence is a deliberate architecture of thought, inviting the reader to slow down and inhabit another mind.</p>
+  <p>When we encounter unfamiliar words—such as <em>serendipity</em>, <em>ephemeral</em>, or <em>melancholy</em>—we are not merely stumbling over vocabulary; we are standing at the threshold of a new nuance of human emotion.</p>
+  <p>Try highlighting any word or paragraph on this page. A floating menu will appear so you can translate it seamlessly into Bahasa Indonesia or save new expressions into your personal vocabulary journal.</p>
+</body>
+</html>`
+      );
+
+      oebps.file(
+        "chap2.xhtml",
+        `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 2: Bridges Across Languages</title></head>
+<body>
+  <h1>Chapter 2: Bridges Across Languages</h1>
+  <p>Translation is never a mechanical substitution of one word for another. Rather, it is the delicate art of carrying the soul of an idea across a river without spilling its resonance.</p>
+  <p>Consider how a single idiom carries centuries of cultural memory. To understand a story written in another tongue is to look through a window into a landscape both foreign and deeply familiar.</p>
+  <p>You can also click the <strong>"Terjemahkan Halaman Ini"</strong> button at the top right to translate the entire visible chapter smoothly alongside the original text.</p>
+</body>
+</html>`
+      );
+
+      oebps.file(
+        "chap3.xhtml",
+        `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 3: The Sanctuary of Solitude</title></head>
+<body>
+  <h1>Chapter 3: The Sanctuary of Solitude</h1>
+  <p>A personal library is a sanctuary built not of stone, but of curiosity. Whether you prefer the warm glow of sepia pages late at night or the crisp clarity of daylight mode, the best reading environment is one that disappears, leaving only the story behind.</p>
+  <p>Upload any <code>.epub</code> file from your device using the <strong>"Unggah EPUB"</strong> button above to begin your own reading journey.</p>
+</body>
+</html>`
+      );
+
+      return await zip.generateAsync({ type: "arraybuffer" });
+    }
+
+    /**
+     * Menerapkan tema dan tipografi pada halaman utama serta konten iframe EPUB.js
+     */
+    function applyReaderStyling() {
+      // Update body theme class
+      el.body.classList.remove("theme-light", "theme-sepia", "theme-dark");
+      el.body.classList.add(`theme-${state.theme}`);
+
+      // Highlight active theme button
+      document.querySelectorAll(".theme-btn").forEach((btn) => {
+        if (btn.dataset.theme === state.theme) {
+          btn.classList.add("ring-2", "ring-blue-500");
+        } else {
+          btn.classList.remove("ring-2", "ring-blue-500");
+        }
+      });
+
+      // Highlight active font button
+      document.querySelectorAll(".font-btn").forEach((btn) => {
+        if (btn.dataset.font === state.fontFamily) {
+          btn.classList.add("ring-2", "ring-blue-500");
+        } else {
+          btn.classList.remove("ring-2", "ring-blue-500");
+        }
+      });
+
+      el.fontSizeLabel.textContent = `${state.fontSize}%`;
+      el.lineHeightLabel.textContent = state.lineHeight.toFixed(2);
+      el.rangeLineHeight.value = state.lineHeight;
+
+      // Simpan preferensi
+      localStorage.setItem("reader_theme", state.theme);
+      localStorage.setItem("reader_font", state.fontFamily);
+      localStorage.setItem("reader_font_size", state.fontSize);
+      localStorage.setItem("reader_line_height", state.lineHeight);
+
+      // Terapkan tema & style ke EPUB.js Rendition
+      if (state.rendition) {
+        const themeStyles = {
+          light: { bg: "#ffffff", color: "#0f172a", link: "#2563eb", bilingualBorder: "#cbd5e1", bilingualBg: "#f8fafc" },
+          sepia: { bg: "#fbf6ec", color: "#3b2f23", link: "#b45309", bilingualBorder: "#d6c5a9", bilingualBg: "#f4ecdc" },
+          dark: { bg: "#0f172a", color: "#f1f5f9", link: "#60a5fa", bilingualBorder: "#334155", bilingualBg: "#1e293b" },
+        };
+        const currentPalette = themeStyles[state.theme] || themeStyles.light;
+        const fontStack =
+          state.fontFamily === "serif"
+            ? "'Lora', 'Merriweather', Georgia, serif"
+            : "'Plus Jakarta Sans', 'Inter', system-ui, sans-serif";
+
+        state.rendition.themes.register("custom", {
+          body: {
+            "background-color": `${currentPalette.bg} !important`,
+            color: `${currentPalette.color} !important`,
+            "font-family": `${fontStack} !important`,
+            "line-height": `${state.lineHeight} !important`,
+            padding: "20px 28px !important",
+          },
+          "p, div, span, li, blockquote": {
+            color: `${currentPalette.color} !important`,
+            "font-family": `${fontStack} !important`,
+            "line-height": `${state.lineHeight} !important`,
+          },
+          "h1, h2, h3, h4": {
+            color: `${currentPalette.color} !important`,
+            "font-family": `${fontStack} !important`,
+            "margin-bottom": "0.75em !important",
+          },
+          a: {
+            color: `${currentPalette.link} !important`,
+          },
+          ".ai-bilingual-trans": {
+            "display": "block",
+            "margin-top": "0.45em",
+            "margin-bottom": "1.1em",
+            "padding": "0.55em 0.85em",
+            "border-left": `3px solid ${currentPalette.link}`,
+            "background-color": `${currentPalette.bilingualBg}`,
+            "border-radius": "0 8px 8px 0",
+            "font-size": "0.95em",
+            "opacity": "0.95",
+          },
+        });
+        state.rendition.themes.select("custom");
+        state.rendition.themes.fontSize(`${state.fontSize}%`);
+      }
+    }
+
+    /**
+     * Memperbarui tampilan tombol toggle Mode Baca (Asli / Terjemahan Penuh / Bilingual)
+     */
+    function updateReadingModeUI() {
+      document.querySelectorAll(".read-mode-btn").forEach((btn) => {
+        const isActive = btn.dataset.readMode === state.readingMode;
+        if (isActive) {
+          btn.classList.add("bg-blue-600", "text-white", "shadow-xs");
+          btn.classList.remove("opacity-75");
+        } else {
+          btn.classList.remove("bg-blue-600", "text-white", "shadow-xs");
+          btn.classList.add("opacity-75");
+        }
+      });
+      localStorage.setItem("reader_reading_mode", state.readingMode);
+    }
+
+    /**
+     * Memuat buku EPUB (dari ArrayBuffer atau Blob) ke dalam EPUB.js
+     */
+    async function loadEpubBook(data, customTitle = null) {
+      try {
+        // Hentikan batch translation sebelumnya jika sedang berjalan
+        if (state.batchJob.running) {
+          state.batchJob.cancelled = true;
+          state.batchJob.running = false;
+        }
+        el.fullTranslateBar.classList.add("hidden");
+
+        el.loader.classList.remove("hidden");
+        el.loaderText.textContent = "Memuat isi buku EPUB...";
+        hideSelectionPopover();
+
+        if (state.book) {
+          state.book.destroy();
+        }
+        el.viewer.innerHTML = "";
+
+        state.book = ePub(data);
+        await state.book.ready;
+
+        // Ambil Metadata Buku
+        const metadata = await state.book.loaded.metadata;
+        state.currentBookTitle = customTitle || metadata.title || "Buku Tanpa Judul";
+        state.currentBookId = metadata.identifier || state.currentBookTitle;
+        el.bookTitle.textContent = state.currentBookTitle;
+
+        // Muat cache terjemahan dari IndexedDB untuk buku & bahasa target ini
+        state.chapterTranslations = await BookTranslationDB.getBookCache(
+          state.currentBookId,
+          state.targetLang
+        );
+
+        const cachedCount = Object.keys(state.chapterTranslations).length;
+        const spineCount = state.book.spine?.spineItems?.length || 0;
+        if (cachedCount > 0) {
+          showToast(
+            `Ditemukan ${cachedCount}/${spineCount} bab terjemahan tersimpan (${state.targetLang}).`,
+            "success"
+          );
+          el.btnDownloadTranslatedBook.classList.remove("hidden");
+        } else {
+          el.btnDownloadTranslatedBook.classList.add("hidden");
+        }
+
+        // Render ke container
+        state.rendition = state.book.renderTo("epub-viewer", {
+          width: "100%",
+          height: "100%",
+          spread: "none",
+          flow: "paginated",
+        });
+
+        applyReaderStyling();
+        updateReadingModeUI();
+
+        // Daftarkan event listener seleksi teks & navigasi di dalam iframe EPUB
+        setupRenditionEvents();
+
+        // Tampilkan lokasi terakhir jika tersimpan di localStorage, atau mulai dari awal
+        const savedCfi = localStorage.getItem(`reader_pos_${state.currentBookId}`);
+        await state.rendition.display(savedCfi || undefined);
+
+        // Muat Daftar Isi (TOC)
+        const navigation = await state.book.loaded.navigation;
+        renderToc(navigation.toc || []);
+
+        // Generate locations untuk progress bar
+        state.locationsReady = false;
+        state.book.locations.generate(1200).then(() => {
+          state.locationsReady = true;
+          updateProgressDisplay(state.rendition.currentLocation());
+        });
+
+        renderBookmarks();
+        el.loader.classList.add("hidden");
+      } catch (err) {
+        console.error("Gagal memuat EPUB:", err);
+        el.loader.classList.add("hidden");
+        showToast("Gagal membaca file EPUB. Pastikan format file valid.", "error");
+      }
+    }
+
+    /**
+     * Merender Daftar Isi (TOC) pada Sidebar
+     */
+    function renderToc(tocItems) {
+      el.tocList.innerHTML = "";
+      if (!tocItems || tocItems.length === 0) {
+        el.tocList.innerHTML = `<li class="p-3 text-xs opacity-60 italic">Daftar isi tidak tersedia dalam buku ini.</li>`;
+        return;
+      }
+
+      function buildItems(items, depth = 0) {
+        items.forEach((item) => {
+          const li = document.createElement("li");
+          const btn = document.createElement("button");
+          btn.className = `w-full text-left py-2 px-3 rounded-xl hover:bg-blue-500/10 hover:text-blue-600 transition flex items-center gap-2 text-xs sm:text-sm`;
+          btn.style.paddingLeft = `${12 + depth * 14}px`;
+          btn.innerHTML = `
+            <span class="w-1.5 h-1.5 rounded-full bg-blue-500/50 shrink-0"></span>
+            <span class="truncate">${escapeHtml(item.label.trim())}</span>
+          `;
+          btn.addEventListener("click", () => {
+            state.rendition.display(item.href);
+            closeMobileSidebar();
+          });
+          li.appendChild(btn);
+          el.tocList.appendChild(li);
+
+          if (item.subitems && item.subitems.length > 0) {
+            buildItems(item.subitems, depth + 1);
+          }
+        });
+      }
+
+      buildItems(tocItems);
+    }
+
+    /**
+     * Mengatur Event di dalam iframe EPUB.js (seleksi teks, perubahan halaman, keyboard)
+     */
+    function setupRenditionEvents() {
+      if (!state.rendition) return;
+
+      // Event ketika lokasi halaman berubah
+      state.rendition.on("relocated", async (location) => {
+        hideSelectionPopover();
+        if (location && location.start) {
+          state.currentCfi = location.start.cfi;
+          state.currentSpineHref = location.start.href;
+          localStorage.setItem(`reader_pos_${state.currentBookId}`, state.currentCfi);
+          updateProgressDisplay(location);
+          updateCurrentChapterName(location.start.href);
+
+          // Terapkan mode baca (Asli / Terjemahan Penuh / Bilingual) pada halaman yang tampil
+          await applyReadingModeToCurrentView(location.start.href);
+        }
+      });
+
+      // Event seleksi teks bawaan EPUB.js
+      state.rendition.on("selected", (cfiRange, contents) => {
+        try {
+          const selection = contents.window.getSelection();
+          const text = selection ? selection.toString().trim() : "";
+          if (!text) return;
+
+          state.selectedText = text;
+
+          // Hitung posisi popover relatif terhadap viewport utama
+          const range = selection.getRangeAt(0);
+          const rect = range.getBoundingClientRect();
+          const viewerRect = el.viewer.getBoundingClientRect();
+
+          const popX = Math.min(
+            Math.max(viewerRect.left + rect.left + rect.width / 2, 140),
+            window.innerWidth - 140
+          );
+          const popY = Math.max(viewerRect.top + rect.top - 52, 72);
+
+          showSelectionPopover(popX, popY);
+        } catch (e) {
+          console.warn("Selection error:", e);
+        }
+      });
+
+      // Hook untuk keyboard & sentuhan di dalam iframe
+      state.rendition.hooks.content.register((contents) => {
+        const doc = contents.document;
+
+        // Simpan teks asli tiap blok paragraf/heading agar bisa beralih mode Asli <-> Terjemahan <-> Bilingual dengan mulus
+        const blocks = doc.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, blockquote");
+        blocks.forEach((node) => {
+          if (!node.dataset.origHtml && node.innerText.trim().length > 0) {
+            node.dataset.origHtml = node.innerHTML;
+            node.dataset.origText = node.innerText.trim();
+          }
+        });
+
+        doc.addEventListener("keydown", (e) => {
+          if (e.key === "ArrowLeft") state.rendition.prev();
+          if (e.key === "ArrowRight") state.rendition.next();
+        });
+
+        doc.addEventListener("mousedown", () => {
+          hideSelectionPopover();
+        });
+      });
+    }
+
+    /**
+     * =========================================================================
+     * MESIN PENERJEMAHAN BAB & SELURUH BUKU (PARAGRAF DEMI PARAGRAF)
+     * =========================================================================
+     */
+
+    /**
+     * Ekstrak paragraf/blok teks dari sebuah Spine Item EPUB tanpa merusak struktur
+     */
+    async function extractSectionParagraphs(section) {
+      try {
+        const doc = await section.load(state.book.load.bind(state.book));
+        if (!doc) return [];
+        const nodes = Array.from(doc.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, blockquote"));
+        const texts = nodes
+          .map((n) => n.textContent.replace(/\s+/g, " ").trim())
+          .filter((t) => t.length > 0);
+        // Hilangkan duplikat bersarang (misal li di dalam blockquote)
+        const uniqueTexts = [];
+        for (let i = 0; i < texts.length; i++) {
+          if (i === 0 || texts[i] !== texts[i - 1]) {
+            uniqueTexts.push(texts[i]);
+          }
+        }
+        return uniqueTexts;
+      } catch (e) {
+        console.warn("Gagal memuat section EPUB:", section.href, e);
+        return [];
+      }
+    }
+
+    /**
+     * Menerjemahkan array paragraf menggunakan Gemini API dengan struktur JSON agar pemetaan 1:1 akurat
+     */
+    async function translateParagraphArray(paragraphs, targetLang) {
+      if (!paragraphs || paragraphs.length === 0) return [];
+
+      // Bagi menjadi chunk maksimal 18 paragraf per panggilan API agar cepat & bebas batas token
+      const CHUNK_SIZE = 18;
+      const allTranslated = [];
+
+      for (let i = 0; i < paragraphs.length; i += CHUNK_SIZE) {
+        if (state.batchJob.cancelled) break;
+        while (state.batchJob.paused && !state.batchJob.cancelled) {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+
+        const chunk = paragraphs.slice(i, i + CHUNK_SIZE);
+        const systemPrompt = `Anda adalah penerjemah buku sastra dan non-fiksi profesional. Terjemahkan setiap elemen teks dalam array JSON ke dalam ${targetLang} secara alami, akurat, dan sastrawi. Pertahankan jumlah dan urutan elemen array secara persis (${chunk.length} item).`;
+
+        const userPrompt = `Terjemahkan array paragraf buku berikut ke dalam ${targetLang}:\n${JSON.stringify(chunk)}`;
+
+        const payload = {
+          contents: [{ parts: [{ text: userPrompt }] }],
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "ARRAY",
+              items: { type: "STRING" },
+            },
+          },
+        };
+
+        const rawJson = await callGeminiWithBackoff(payload);
+        let parsed = [];
+        try {
+          parsed = JSON.parse(rawJson);
+        } catch (e) {
+          parsed = chunk;
+        }
+
+        // Pastikan panjang array hasil selalu sama dengan input chunk
+        for (let j = 0; j < chunk.length; j++) {
+          allTranslated.push(parsed[j] || chunk[j]);
+        }
+      }
+
+      return allTranslated;
+    }
+
+    /**
+     * Menerjemahkan satu section/bab EPUB tertentu dan menyimpannya ke cache IndexedDB
+     */
+    async function translateAndCacheSection(section) {
+      if (!section || !section.href) return null;
+      const hrefKey = section.href.split("#")[0];
+
+      // Jika sudah ada di cache memori, langsung kembalikan
+      if (state.chapterTranslations[hrefKey]?.pairs?.length > 0) {
+        return state.chapterTranslations[hrefKey];
+      }
+
+      const paragraphs = await extractSectionParagraphs(section);
+      if (paragraphs.length === 0) {
+        const emptyRecord = { href: hrefKey, pairs: [] };
+        state.chapterTranslations[hrefKey] = emptyRecord;
+        return emptyRecord;
+      }
+
+      const translatedList = await translateParagraphArray(paragraphs, state.targetLang);
+      const pairs = paragraphs.map((orig, idx) => ({
+        orig,
+        trans: translatedList[idx] || orig,
+      }));
+
+      const record = {
+        href: hrefKey,
+        pairs,
+        updatedAt: Date.now(),
+      };
+
+      state.chapterTranslations[hrefKey] = record;
+      await BookTranslationDB.saveBookCache(
+        state.currentBookId,
+        state.targetLang,
+        state.currentBookTitle,
+        state.chapterTranslations
+      );
+
+      return record;
+    }
+
+    /**
+     * Menyuntikkan hasil terjemahan ke dalam DOM iframe EPUB.js sesuai mode baca aktif
+     */
+    async function applyReadingModeToCurrentView(href = null) {
+      if (!state.rendition) return;
+      const contentsList = state.rendition.getContents();
+      if (!contentsList || contentsList.length === 0) return;
+
+      const activeHref = (href || state.currentSpineHref || "").split("#")[0];
+      const doc = contentsList[0].document;
+      if (!doc || !doc.body) return;
+
+      const blocks = Array.from(doc.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, blockquote")).filter(
+        (node) => (node.dataset.origText || node.innerText.trim()).length > 0
+      );
+
+      // Pastikan data asli tersimpan
+      blocks.forEach((node) => {
+        if (!node.dataset.origHtml) {
+          node.dataset.origHtml = node.innerHTML;
+          node.dataset.origText = node.innerText.trim();
+        }
+      });
+
+      // Mode 1: ASLI — Kembalikan semua node ke HTML asli
+      if (state.readingMode === "original") {
+        blocks.forEach((node) => {
+          if (node.dataset.origHtml) {
+            node.innerHTML = node.dataset.origHtml;
+          }
+        });
+        return;
+      }
+
+      // Cari terjemahan bab aktif di cache
+      let cachedChapter = state.chapterTranslations[activeHref];
+      if (!cachedChapter) {
+        // Coba pencocokan parsial href
+        const matchedKey = Object.keys(state.chapterTranslations).find(
+          (k) => k.endsWith(activeHref) || activeHref.endsWith(k)
+        );
+        if (matchedKey) cachedChapter = state.chapterTranslations[matchedKey];
+      }
+
+      // Auto-Translate on Page Turn jika bab belum diterjemahkan
+      if (!cachedChapter && activeHref && state.activeSectionTranslating !== activeHref) {
+        const section = state.book?.spine?.get(activeHref);
+        if (section) {
+          try {
+            state.activeSectionTranslating = activeHref;
+            el.loader.classList.remove("hidden");
+            el.loaderText.textContent = `Menerjemahkan bab ini ke ${state.targetLang}...`;
+            cachedChapter = await translateAndCacheSection(section);
+          } catch (err) {
+            showToast("Gagal menerjemahkan bab otomatis.", "error");
+          } finally {
+            state.activeSectionTranslating = null;
+            el.loader.classList.add("hidden");
+          }
+        }
+      }
+
+      if (!cachedChapter || !cachedChapter.pairs || cachedChapter.pairs.length === 0) return;
+
+      // Bangun peta pencocokan cepat teks asli -> teks terjemahan
+      const translationMap = new Map();
+      cachedChapter.pairs.forEach((p) => {
+        const norm = p.orig.replace(/\s+/g, " ").trim();
+        translationMap.set(norm, p.trans);
+      });
+
+      blocks.forEach((node, idx) => {
+        const origText = (node.dataset.origText || "").replace(/\s+/g, " ").trim();
+        const translatedText =
+          translationMap.get(origText) || cachedChapter.pairs[idx]?.trans || null;
+
+        if (!translatedText) return;
+
+        if (state.readingMode === "translated") {
+          node.textContent = translatedText;
+        } else if (state.readingMode === "bilingual") {
+          node.innerHTML = `${node.dataset.origHtml}<span class="ai-bilingual-trans">${escapeHtml(translatedText)}</span>`;
+        }
+      });
+    }
+
+    /**
+     * Memulai proses "Terjemahkan Seluruh Buku" (Full Book Translation) di latar belakang
+     */
+    async function startFullBookTranslation() {
+      if (!state.book || !state.book.spine) {
+        showToast("Tidak ada buku yang dimuat.", "error");
+        return;
+      }
+
+      if (state.batchJob.running) {
+        el.fullTranslateBar.classList.remove("hidden");
+        showToast("Proses penerjemahan seluruh buku sedang berjalan.", "info");
+        return;
+      }
+
+      const spineItems = state.book.spine.spineItems || [];
+      if (spineItems.length === 0) {
+        showToast("Struktur bab buku tidak ditemukan.", "error");
+        return;
+      }
+
+      // Otomatis ubah ke mode Terjemahan Penuh jika masih di mode Asli
+      if (state.readingMode === "original") {
+        state.readingMode = "translated";
+        updateReadingModeUI();
+      }
+
+      state.batchJob = {
+        running: true,
+        paused: false,
+        cancelled: false,
+        total: spineItems.length,
+        completed: 0,
+        currentTitle: "",
+      };
+
+      el.fullTranslateBar.classList.remove("hidden");
+      el.fullTranslateSpinner.classList.remove("hidden");
+      el.btnPauseResumeFull.classList.remove("hidden");
+      el.btnPauseResumeFull.innerHTML = `<i data-lucide="pause" class="w-3.5 h-3.5 text-amber-600"></i><span>Jeda</span>`;
+      lucide.createIcons();
+
+      try {
+        for (let i = 0; i < spineItems.length; i++) {
+          if (state.batchJob.cancelled) break;
+
+          // Tunggu jika pengguna menekan Jeda (Pause)
+          while (state.batchJob.paused && !state.batchJob.cancelled) {
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          if (state.batchJob.cancelled) break;
+
+          const section = spineItems[i];
+          const pctBefore = Math.round((i / spineItems.length) * 100);
+          el.fullTranslateStatus.textContent = `Menerjemahkan Bab ${i + 1} dari ${spineItems.length} (${state.targetLang})...`;
+          el.fullTranslatePct.textContent = `${pctBefore}%`;
+          el.fullTranslateProgress.style.width = `${pctBefore}%`;
+
+          await translateAndCacheSection(section);
+
+          // Jika bab yang baru selesai diterjemahkan adalah bab yang sedang dibaca, langsung perbarui tampilan!
+          const currentHrefClean = (state.currentSpineHref || "").split("#")[0];
+          const sectionHrefClean = (section.href || "").split("#")[0];
+          if (
+            currentHrefClean &&
+            (currentHrefClean.endsWith(sectionHrefClean) || sectionHrefClean.endsWith(currentHrefClean))
+          ) {
+            await applyReadingModeToCurrentView(currentHrefClean);
+          }
+
+          state.batchJob.completed = i + 1;
+          const pctAfter = Math.round(((i + 1) / spineItems.length) * 100);
+          el.fullTranslatePct.textContent = `${pctAfter}%`;
+          el.fullTranslateProgress.style.width = `${pctAfter}%`;
+        }
+
+        if (!state.batchJob.cancelled) {
+          el.fullTranslateStatus.textContent = `Selesai! Seluruh ${spineItems.length} bab telah diterjemahkan ke ${state.targetLang}.`;
+          el.fullTranslateSpinner.classList.add("hidden");
+          el.btnPauseResumeFull.classList.add("hidden");
+          el.btnDownloadTranslatedBook.classList.remove("hidden");
+          showToast("Seluruh buku berhasil diterjemahkan & disimpan!", "success");
+          await applyReadingModeToCurrentView();
+        }
+      } catch (err) {
+        console.error("Full book translation error:", err);
+        el.fullTranslateStatus.textContent = "Terjadi gangguan jaringan saat menerjemahkan buku. Progres tersimpan.";
+        el.fullTranslateSpinner.classList.add("hidden");
+        showToast("Penerjemahan terhenti sementara. Klik Terjemahkan Buku untuk melanjutkan.", "error");
+      } finally {
+        state.batchJob.running = false;
+      }
+    }
+
+    /**
+     * Mengunduh hasil terjemahan seluruh buku dalam format HTML rapi yang siap dibaca offline
+     */
+    function downloadTranslatedBookHtml() {
+      const spineItems = state.book?.spine?.spineItems || [];
+      let chaptersHtml = "";
+
+      spineItems.forEach((sec, index) => {
+        const hrefClean = (sec.href || "").split("#")[0];
+        const cached = state.chapterTranslations[hrefClean];
+        if (!cached || !cached.pairs || cached.pairs.length === 0) return;
+
+        const parasHtml = cached.pairs
+          .map((p) => {
+            if (state.readingMode === "bilingual") {
+              return `<div class="pair"><p class="orig">${escapeHtml(p.orig)}</p><p class="trans">${escapeHtml(p.trans)}</p></div>`;
+            }
+            return `<p>${escapeHtml(p.trans)}</p>`;
+          })
+          .join("\n");
+
+        chaptersHtml += `<section class="chapter"><h2>Bagian ${index + 1}</h2>${parasHtml}</section>\n`;
+      });
+
+      if (!chaptersHtml) {
+        showToast("Belum ada bab yang diterjemahkan untuk diunduh.", "info");
+        return;
+      }
+
+      const fullDoc = `<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<title>${escapeHtml(state.currentBookTitle)} — Terjemahan (${escapeHtml(state.targetLang)})</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 760px; margin: 40px auto; padding: 0 20px; line-height: 1.8; color: #1e293b; background: #fbf6ec; }
+  h1 { text-align: center; border-bottom: 2px solid #d6c5a9; padding-bottom: 16px; }
+  .chapter { margin-top: 40px; padding-top: 20px; border-top: 1px solid #e2d5be; }
+  .pair { margin-bottom: 20px; }
+  .orig { color: #64748b; font-style: italic; margin-bottom: 4px; }
+  .trans { border-left: 3px solid #2563eb; padding-left: 12px; margin-top: 0; }
+</style>
+</head>
+<body>
+  <h1>${escapeHtml(state.currentBookTitle)}<br/><small style="font-size:0.55em; color:#64748b;">Terjemahan: ${escapeHtml(state.targetLang)}</small></h1>
+  ${chaptersHtml}
+</body>
+</html>`;
+
+      const blob = new Blob([fullDoc], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${state.currentBookTitle.replace(/[^a-z0-9]/gi, "_")}_${state.targetLang.replace(/\s+/g, "_")}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("File buku terjemahan berhasil diunduh!", "success");
+    }
+
+    function updateCurrentChapterName(href) {
+      if (!state.book || !state.book.navigation || !href) return;
+      const cleanHref = href.split("#")[0];
+      const toc = state.book.navigation.toc || [];
+      const found = toc.find((item) => item.href && item.href.includes(cleanHref));
+      if (found) {
+        state.currentChapterTitle = found.label.trim();
+        el.chapterTitle.textContent = state.currentChapterTitle;
+      }
+    }
+
+    function updateProgressDisplay(location) {
+      if (!location || !location.start) return;
+      let pct = 0;
+      if (state.locationsReady && state.book.locations) {
+        pct = Math.round(state.book.locations.percentageFromCfi(location.start.cfi) * 100);
+      } else if (typeof location.start.percentage === "number") {
+        pct = Math.round(location.start.percentage * 100);
+      }
+      pct = Math.max(0, Math.min(100, pct || 0));
+      el.progressSlider.value = pct;
+      el.progressPercent.textContent = `${pct}%`;
+
+      if (location.start.displayed) {
+        el.pageLocationLabel.textContent = `Hal. ${location.start.displayed.page} dari ${location.start.displayed.total}`;
+      }
+    }
+
+    function showSelectionPopover(x, y) {
+      el.selectionPopover.style.left = `${x}px`;
+      el.selectionPopover.style.top = `${y}px`;
+      el.selectionPopover.classList.remove("hidden");
+    }
+
+    function hideSelectionPopover() {
+      el.selectionPopover.classList.add("hidden");
+    }
+
+    /**
+     * Mengambil teks yang sedang terlihat di halaman/bab aktif
+     */
+    function getVisibleChapterText() {
+      try {
+        const contentsList = state.rendition ? state.rendition.getContents() : [];
+        if (contentsList && contentsList.length > 0) {
+          const doc = contentsList[0].document;
+          const bodyText = doc.body ? doc.body.innerText.trim() : "";
+          // Batasi panjang maksimal agar respons AI cepat dan fokus
+          return bodyText.slice(0, 3500);
+        }
+      } catch (e) {
+        console.warn("Gagal mengambil teks bab:", e);
+      }
+      return "";
+    }
+
+    /**
+     * =========================================================================
+     * INTEGRASI GEMINI API UNTUK TERJEMAHAN KONTEKSTUAL
+     * =========================================================================
+     */
+    async function callGeminiWithBackoff(payload, retries = 3, delay = 1000) {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const data = await response.json();
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!text) throw new Error("Respons kosong dari AI");
+          return text;
+        } catch (err) {
+          if (attempt === retries) throw err;
+          await new Promise((res) => setTimeout(res, delay * Math.pow(2, attempt)));
+        }
+      }
+    }
+
+    /**
+     * Menerjemahkan kata, kalimat, atau satu halaman penuh
+     */
+    async function translateText(text, isFullChapter = false) {
+      const cleanText = (text || "").trim();
+      if (!cleanText) {
+        showToast("Tidak ada teks yang dipilih untuk diterjemahkan.", "error");
+        return;
+      }
+
+      // Buka drawer terjemahan
+      el.translationDrawer.classList.remove("hidden");
+      el.translationSubtitle.textContent = `Target: ${state.targetLang}`;
+      el.sourceTextContent.textContent =
+        cleanText.length > 450 ? `${cleanText.slice(0, 450)}...` : cleanText;
+
+      el.translationLoading.classList.remove("hidden");
+      el.translationOutput.classList.add("hidden");
+
+      const wordCount = cleanText.split(/\s+/).length;
+      const isSingleWordOrPhrase = !isFullChapter && wordCount <= 4;
+
+      const systemPrompt = `Anda adalah penerjemah sastra dan ahli bahasa profesional. Terjemahkan teks dari buku ke dalam ${state.targetLang} dengan gaya bahasa yang alami, mengalir, dan akurat sesuai konteks bacaan. Gunakan bahasa penjelasan yang santun dan jelas dalam Bahasa Indonesia.`;
+
+      const userPrompt = isSingleWordOrPhrase
+        ? `Analisis dan terjemahkan kata/frasa berikut ke dalam ${state.targetLang}:
+"${cleanText}"
+
+Berikan format ringkas:
+1. **Terjemahan Utama**: (arti paling tepat)
+2. **Nuansa & Makna Kontekstual**: (penjelasan singkat penggunaan kata ini dalam sastra/kalimat)
+3. **Contoh Kalimat**: (1 contoh kalimat singkat beserta artinya)`
+        : `Terjemahkan kutipan/halaman buku berikut ke dalam ${state.targetLang} secara alami dan sastrawi tanpa mengubah makna aslinya. Pertahankan pembagian paragraf agar nyaman dibaca:
+
+"${cleanText}"`;
+
+      try {
+        const resultText = await callGeminiWithBackoff({
+          contents: [{ parts: [{ text: userPrompt }] }],
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+        });
+
+        state.lastTranslationResult = resultText;
+        el.translationOutput.innerHTML = formatMarkdownSimple(resultText);
+      } catch (err) {
+        console.error("Translation error:", err);
+        el.translationOutput.innerHTML = `
+          <div class="text-rose-500 text-xs space-y-1">
+            <p class="font-bold">Gagal terhubung ke layanan terjemahan AI.</p>
+            <p>Silakan periksa koneksi internet Anda dan coba beberapa saat lagi.</p>
+          </div>
+        `;
+      } finally {
+        el.translationLoading.classList.add("hidden");
+        el.translationOutput.classList.remove("hidden");
+      }
+    }
+
+    /**
+     * Format markdown ringan (bold, italic, paragraf) menjadi HTML aman
+     */
+    function formatMarkdownSimple(rawText) {
+      const escaped = escapeHtml(rawText);
+      return escaped
+        .replace(/\*\*(.+?)\*\*/g, "<strong class='font-bold text-blue-600 dark:text-blue-400'>$1</strong>")
+        .replace(/\*(.+?)\*/g, "<em class='italic'>$1</em>")
+        .split(/\n{2,}/)
+        .map((para) => `<p class="mb-2.5 last:mb-0">${para.replace(/\n/g, "<br/>")}</p>`)
+        .join("");
+    }
+
+    /**
+     * =========================================================================
+     * PENANDA HALAMAN (BOOKMARKS) & KAMUS KOSAKATA (LOCALSTORAGE)
+     * =========================================================================
+     */
+    function addCurrentBookmark() {
+      if (!state.currentCfi) {
+        showToast("Tunggu hingga halaman selesai dimuat.", "info");
+        return;
+      }
+
+      const exists = state.bookmarks.some(
+        (b) => b.bookId === state.currentBookId && b.cfi === state.currentCfi
+      );
+      if (exists) {
+        showToast("Halaman ini sudah ada di daftar penanda.", "info");
+        return;
+      }
+
+      const newBookmark = {
+        id: Date.now().toString(),
+        bookId: state.currentBookId,
+        bookTitle: state.currentBookTitle,
+        chapterTitle: state.currentChapterTitle,
+        cfi: state.currentCfi,
+        createdAt: new Date().toLocaleDateString("id-ID", {
+          day: "numeric",
+          month: "short",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      };
+
+      state.bookmarks.unshift(newBookmark);
+      localStorage.setItem("reader_bookmarks", JSON.stringify(state.bookmarks));
+      renderBookmarks();
+      showToast("Halaman berhasil ditandai!", "success");
+    }
+
+    function renderBookmarks() {
+      const bookBookmarks = state.bookmarks.filter((b) => b.bookId === state.currentBookId);
+      el.bookmarkCount.textContent = bookBookmarks.length;
+      el.bookmarksList.innerHTML = "";
+
+      if (bookBookmarks.length === 0) {
+        el.bookmarksList.innerHTML = `
+          <div class="p-4 rounded-2xl border border-dashed text-center text-xs opacity-65" style="border-color: var(--border-color);">
+            Belum ada halaman yang ditandai pada buku ini. Klik ikon penanda di bilah atas untuk menyimpan posisi baca.
+          </div>
+        `;
+        return;
+      }
+
+      bookBookmarks.forEach((bm) => {
+        const card = document.createElement("div");
+        card.className = "p-3 rounded-xl border surface-card hover:border-blue-500/50 transition flex items-start justify-between gap-2 group";
+        card.innerHTML = `
+          <button class="text-left flex-1 min-w-0">
+            <div class="font-semibold text-xs truncate text-blue-600 dark:text-blue-400">${escapeHtml(bm.chapterTitle)}</div>
+            <div class="text-[11px] opacity-65 mt-0.5">${escapeHtml(bm.createdAt)}</div>
+          </button>
+          <button data-del-bm="${bm.id}" title="Hapus Penanda" class="p-1.5 rounded-lg hover:bg-rose-500/10 text-rose-500 opacity-70 hover:opacity-100">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+          </button>
+        `;
+
+        card.querySelector("button:first-child").addEventListener("click", () => {
+          state.rendition.display(bm.cfi);
+          closeMobileSidebar();
+        });
+
+        card.querySelector("[data-del-bm]").addEventListener("click", (e) => {
+          e.stopPropagation();
+          state.bookmarks = state.bookmarks.filter((item) => item.id !== bm.id);
+          localStorage.setItem("reader_bookmarks", JSON.stringify(state.bookmarks));
+          renderBookmarks();
+          showToast("Penanda dihapus.", "info");
+        });
+
+        el.bookmarksList.appendChild(card);
+      });
+      lucide.createIcons();
+    }
+
+    async function saveVocabularyItem(rawWord) {
+      const word = (rawWord || "").trim();
+      if (!word) return;
+
+      const shortWord = word.length > 120 ? `${word.slice(0, 120)}...` : word;
+
+      // Cek duplikat
+      if (state.vocabList.some((v) => v.word.toLowerCase() === shortWord.toLowerCase())) {
+        showToast("Kosakata ini sudah tersimpan di kamus pribadi.", "info");
+        return;
+      }
+
+      showToast("Menyimpan & mencari arti singkat...", "info");
+
+      let quickMeaning = "Tersimpan dari bacaan";
+      try {
+        quickMeaning = await callGeminiWithBackoff({
+          contents: [
+            {
+              parts: [
+                {
+                  text: `Berikan terjemahan sangat singkat (maksimal 12 kata) dalam ${state.targetLang} untuk kata/frasa berikut tanpa pembukaan: "${shortWord}"`,
+                },
+              ],
+            },
+          ],
+        });
+      } catch (e) {
+        // Fallback jika offline
+      }
+
+      const item = {
+        id: Date.now().toString(),
+        word: shortWord,
+        meaning: quickMeaning.trim(),
+        bookTitle: state.currentBookTitle,
+        savedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short" }),
+      };
+
+      state.vocabList.unshift(item);
+      localStorage.setItem("reader_vocab", JSON.stringify(state.vocabList));
+      renderVocabulary();
+      showToast("Kosakata berhasil disimpan!", "success");
+    }
+
+    function renderVocabulary() {
+      el.vocabCount.textContent = state.vocabList.length;
+      el.vocabList.innerHTML = "";
+
+      if (state.vocabList.length === 0) {
+        el.vocabList.innerHTML = `
+          <div class="p-4 rounded-2xl border border-dashed text-center text-xs opacity-65" style="border-color: var(--border-color);">
+            Kamus pribadi masih kosong. Sorot kata asing saat membaca lalu pilih <strong>"Simpan Kosakata"</strong>.
+          </div>
+        `;
+        return;
+      }
+
+      state.vocabList.forEach((v) => {
+        const card = document.createElement("div");
+        card.className = "p-3 rounded-xl border surface-card space-y-1 relative group";
+        card.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <span class="font-bold text-xs text-emerald-600 dark:text-emerald-400 break-words">${escapeHtml(v.word)}</span>
+            <button data-del-vocab="${v.id}" title="Hapus" class="p-1 rounded-lg hover:bg-rose-500/10 text-rose-500 shrink-0">
+              <i data-lucide="x" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+          <p class="text-xs opacity-85 leading-snug">${escapeHtml(v.meaning)}</p>
+          <div class="text-[10px] opacity-55 pt-1 flex justify-between">
+            <span class="truncate max-w-[160px]">${escapeHtml(v.bookTitle)}</span>
+            <span>${escapeHtml(v.savedAt)}</span>
+          </div>
+        `;
+
+        card.querySelector("[data-del-vocab]").addEventListener("click", () => {
+          state.vocabList = state.vocabList.filter((item) => item.id !== v.id);
+          localStorage.setItem("reader_vocab", JSON.stringify(state.vocabList));
+          renderVocabulary();
+        });
+
+        el.vocabList.appendChild(card);
+      });
+      lucide.createIcons();
+    }
+
+    /**
+     * =========================================================================
+     * EVENT LISTENERS UI & NAVIGASI
+     * =========================================================================
+     */
+    function openMobileSidebar() {
+      el.sidebar.classList.remove("-translate-x-full");
+      el.sidebarBackdrop.classList.remove("hidden");
+    }
+
+    function closeMobileSidebar() {
+      el.sidebar.classList.add("-translate-x-full");
+      el.sidebarBackdrop.classList.add("hidden");
+    }
+
+    // Sidebar Toggle
+    document.getElementById("btn-toggle-sidebar").addEventListener("click", () => {
+      if (window.innerWidth < 1024) {
+        const isClosed = el.sidebar.classList.contains("-translate-x-full");
+        isClosed ? openMobileSidebar() : closeMobileSidebar();
+      } else {
+        el.sidebar.classList.toggle("hidden");
+      }
+    });
+    document.getElementById("btn-close-sidebar").addEventListener("click", closeMobileSidebar);
+    el.sidebarBackdrop.addEventListener("click", closeMobileSidebar);
+
+    // Sidebar Tabs (Daftar Isi, Penanda, Kosakata)
+    document.querySelectorAll(".sidebar-tab").forEach((tabBtn) => {
+      tabBtn.addEventListener("click", () => {
+        const target = tabBtn.dataset.tab;
+        document.querySelectorAll(".sidebar-tab").forEach((b) => {
+          b.classList.remove("bg-blue-600", "text-white", "shadow-xs");
+          b.classList.add("opacity-75");
+        });
+        tabBtn.classList.add("bg-blue-600", "text-white", "shadow-xs");
+        tabBtn.classList.remove("opacity-75");
+
+        document.querySelectorAll(".sidebar-panel").forEach((panel) => panel.classList.add("hidden"));
+        document.getElementById(`tab-content-${target}`).classList.remove("hidden");
+      });
+    });
+
+    // Settings Panel Toggle
+    document.getElementById("btn-toggle-settings").addEventListener("click", (e) => {
+      e.stopPropagation();
+      el.settingsPanel.classList.toggle("hidden");
+    });
+    document.getElementById("btn-close-settings").addEventListener("click", () => {
+      el.settingsPanel.classList.add("hidden");
+    });
+    document.addEventListener("click", (e) => {
+      if (!el.settingsPanel.contains(e.target) && e.target.id !== "btn-toggle-settings") {
+        el.settingsPanel.classList.add("hidden");
+      }
+    });
+
+    // Theme Selection
+    document.querySelectorAll(".theme-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.theme = btn.dataset.theme;
+        applyReaderStyling();
+      });
+    });
+
+    // Font Family Selection
+    document.querySelectorAll(".font-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.fontFamily = btn.dataset.font;
+        applyReaderStyling();
+      });
+    });
+
+    // Font Size Controls
+    document.getElementById("btn-font-dec").addEventListener("click", () => {
+      state.fontSize = Math.max(70, state.fontSize - 10);
+      applyReaderStyling();
+    });
+    document.getElementById("btn-font-inc").addEventListener("click", () => {
+      state.fontSize = Math.min(180, state.fontSize + 10);
+      applyReaderStyling();
+    });
+    document.getElementById("btn-font-reset").addEventListener("click", () => {
+      state.fontSize = 100;
+      applyReaderStyling();
+    });
+
+    // Line Height Slider
+    el.rangeLineHeight.addEventListener("input", (e) => {
+      state.lineHeight = parseFloat(e.target.value);
+      applyReaderStyling();
+    });
+
+    // Target Language Selectors
+    async function syncTargetLanguage(val) {
+      state.targetLang = val;
+      el.selectTargetLang.value = val;
+      el.selectTargetLangMobile.value = val;
+      localStorage.setItem("reader_target_lang", val);
+
+      // Muat ulang cache IndexedDB untuk bahasa baru
+      state.chapterTranslations = await BookTranslationDB.getBookCache(
+        state.currentBookId,
+        state.targetLang
+      );
+      showToast(`Bahasa target diubah ke ${val}`, "info");
+
+      if (state.readingMode !== "original") {
+        await applyReadingModeToCurrentView();
+      }
+    }
+    el.selectTargetLang.addEventListener("change", (e) => syncTargetLanguage(e.target.value));
+    el.selectTargetLangMobile.addEventListener("change", (e) => syncTargetLanguage(e.target.value));
+
+    // Reading Mode Toggle Buttons (Asli / Terjemahan Penuh / Bilingual)
+    document.querySelectorAll(".read-mode-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        state.readingMode = btn.dataset.readMode;
+        updateReadingModeUI();
+        await applyReadingModeToCurrentView();
+      });
+    });
+
+    // Full Book Translation Buttons & Controls
+    document.getElementById("btn-full-book-translate").addEventListener("click", startFullBookTranslation);
+    document.getElementById("btn-settings-translate-all").addEventListener("click", () => {
+      el.settingsPanel.classList.add("hidden");
+      startFullBookTranslation();
+    });
+
+    el.btnPauseResumeFull.addEventListener("click", () => {
+      if (!state.batchJob.running) return;
+      state.batchJob.paused = !state.batchJob.paused;
+      if (state.batchJob.paused) {
+        el.fullTranslateStatus.textContent = `Dijeda pada Bab ${state.batchJob.completed} dari ${state.batchJob.total}...`;
+        el.fullTranslateSpinner.classList.add("hidden");
+        el.btnPauseResumeFull.innerHTML = `<i data-lucide="play" class="w-3.5 h-3.5 text-emerald-600"></i><span>Lanjutkan</span>`;
+      } else {
+        el.fullTranslateSpinner.classList.remove("hidden");
+        el.btnPauseResumeFull.innerHTML = `<i data-lucide="pause" class="w-3.5 h-3.5 text-amber-600"></i><span>Jeda</span>`;
+      }
+      lucide.createIcons();
+    });
+
+    document.getElementById("btn-cancel-full").addEventListener("click", () => {
+      if (state.batchJob.running) {
+        state.batchJob.cancelled = true;
+        state.batchJob.running = false;
+        showToast("Penerjemahan massal dihentikan. Bab yang sudah selesai tetap tersimpan.", "info");
+      }
+      el.fullTranslateBar.classList.add("hidden");
+    });
+
+    el.btnDownloadTranslatedBook.addEventListener("click", downloadTranslatedBookHtml);
+
+    // Chapter / Page Navigation
+    document.getElementById("btn-prev-page").addEventListener("click", () => {
+      if (state.rendition) state.rendition.prev();
+    });
+    document.getElementById("btn-next-page").addEventListener("click", () => {
+      if (state.rendition) state.rendition.next();
+    });
+
+    // Keyboard Navigation on Main Window
+    document.addEventListener("keydown", (e) => {
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+      if (e.key === "ArrowLeft" && state.rendition) state.rendition.prev();
+      if (e.key === "ArrowRight" && state.rendition) state.rendition.next();
+    });
+
+    // Progress Slider Scrubbing
+    el.progressSlider.addEventListener("change", (e) => {
+      if (!state.book || !state.locationsReady) return;
+      const pct = parseInt(e.target.value, 10) / 100;
+      const cfi = state.book.locations.cfiFromPercentage(pct);
+      if (cfi) state.rendition.display(cfi);
+    });
+
+    // Bookmark Button
+    document.getElementById("btn-add-bookmark").addEventListener("click", addCurrentBookmark);
+
+    // Floating Selection Popover Buttons
+    document.getElementById("btn-pop-translate").addEventListener("click", () => {
+      hideSelectionPopover();
+      translateText(state.selectedText, false);
+    });
+    document.getElementById("btn-pop-save-vocab").addEventListener("click", () => {
+      hideSelectionPopover();
+      saveVocabularyItem(state.selectedText);
+    });
+    document.getElementById("btn-pop-close").addEventListener("click", hideSelectionPopover);
+
+    // Translate Current Page/Chapter Button
+    document.getElementById("btn-translate-page").addEventListener("click", () => {
+      const visibleText = getVisibleChapterText();
+      if (!visibleText) {
+        showToast("Konten halaman belum siap diterjemahkan.", "error");
+        return;
+      }
+      state.selectedText = visibleText;
+      translateText(visibleText, true);
+    });
+
+    // Save Vocabulary from Translation Drawer
+    document.getElementById("btn-save-from-drawer").addEventListener("click", () => {
+      if (state.selectedText) saveVocabularyItem(state.selectedText);
+    });
+
+    // Close & Copy Translation Drawer
+    document.getElementById("btn-close-translation").addEventListener("click", () => {
+      el.translationDrawer.classList.add("hidden");
+    });
+    document.getElementById("btn-copy-translation").addEventListener("click", () => {
+      if (!state.lastTranslationResult) return;
+      const tempInput = document.createElement("textarea");
+      tempInput.value = state.lastTranslationResult;
+      document.body.appendChild(tempInput);
+      tempInput.select();
+      document.execCommand("copy");
+      document.body.removeChild(tempInput);
+      showToast("Hasil terjemahan disalin ke papan klip!", "success");
+    });
+
+    // Dismiss Hint Banner
+    document.getElementById("btn-dismiss-hint").addEventListener("click", () => {
+      document.getElementById("hint-banner").classList.add("hidden");
+    });
+
+    // Upload Local EPUB File
+    document.getElementById("epub-upload-input").addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      if (!file.name.toLowerCase().endsWith(".epub")) {
+        showToast("Harap pilih file berformat .epub", "error");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const cleanFileName = file.name.replace(/\.epub$/i, "");
+        await loadEpubBook(event.target.result, cleanFileName);
+        showToast(`Berhasil membuka "${cleanFileName}"`, "success");
+      };
+      reader.onerror = () => {
+        showToast("Gagal membaca file dari perangkat.", "error");
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // Reload Sample Book Button
+    document.getElementById("btn-load-sample").addEventListener("click", async () => {
+      const sampleBuffer = await createSampleEpubBlob();
+      await loadEpubBook(sampleBuffer, "The Art of Quiet Reading (Buku Contoh)");
+      closeMobileSidebar();
+      showToast("Buku contoh bawaan dimuat.", "info");
+    });
+
+    // Resize Handler untuk EPUB.js Rendition
+    let resizeTimeout;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        if (state.rendition) {
+          state.rendition.resize();
+        }
+      }, 200);
+    });
+
+    /**
+     * Inisialisasi Awal Aplikasi
+     */
+    window.addEventListener("DOMContentLoaded", async () => {
+      lucide.createIcons();
+      el.selectTargetLang.value = state.targetLang;
+      el.selectTargetLangMobile.value = state.targetLang;
+      applyReaderStyling();
+      renderVocabulary();
+
+      // Muat buku contoh bawaan saat pertama kali dibuka
+      const sampleBuffer = await createSampleEpubBlob();
+      await loadEpubBook(sampleBuffer, "The Art of Quiet Reading (Buku Contoh)");
+    });
+  </script>
+</body>
+</html>

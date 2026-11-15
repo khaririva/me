@@ -1,0 +1,94 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg-app: #f7f7f8;
+  --bg-surface: #ffffff;
+  --bg-sidebar: rgba(247, 247, 248, 0.85);
+  --bg-reader: #ffffff;
+  --text-primary: #111827;
+  --text-secondary: #52525b;
+  --border-color: #e4e4e7;
+  --accent: #2563eb;
+  --accent-soft: #eff6ff;
+}
+
+html.theme-sepia {
+  --bg-app: #efe6d5;
+  --bg-surface: #f7f0e2;
+  --bg-sidebar: rgba(242, 233, 216, 0.9);
+  --bg-reader: #fbf6ec;
+  --text-primary: #3b2f23;
+  --text-secondary: #6e5c49;
+  --border-color: #dfd2bc;
+  --accent: #b45309;
+  --accent-soft: #fef3c7;
+}
+
+html.dark {
+  --bg-app: #0b0f17;
+  --bg-surface: #111827;
+  --bg-sidebar: rgba(15, 23, 42, 0.88);
+  --bg-reader: #0f172a;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --border-color: #1e293b;
+  --accent: #3b82f6;
+  --accent-soft: #1e293b;
+}
+
+body {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.font-serif-reader {
+  font-family: 'Lora', Georgia, serif;
+}
+
+.font-mono-mac {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+}
+
+.mac-surface {
+  background-color: var(--bg-surface);
+  border-color: var(--border-color);
+}
+
+.mac-sidebar {
+  background-color: var(--bg-sidebar);
+  border-color: var(--border-color);
+}
+
+.mac-reader-stage {
+  background-color: var(--bg-reader);
+  border-color: var(--border-color);
+}
+
+#epub-viewer iframe {
+  border: none !important;
+  max-width: 100% !important;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.6);
+}
