@@ -42490,6 +42490,19 @@ function App() {
 	const backgroundPolishInFlightRef = (0, import_react.useRef)(/* @__PURE__ */ new Set());
 	const scrollLastTopRef = (0, import_react.useRef)(0);
 	const scrollContainerBoundRef = (0, import_react.useRef)(null);
+	const chromeVisibleRef = (0, import_react.useRef)(chromeVisible);
+	const lastChromeToggleAtRef = (0, import_react.useRef)(0);
+	const immersiveTransitionUntilRef = (0, import_react.useRef)(0);
+	const immersiveTransitionVersionRef = (0, import_react.useRef)(0);
+	const lastNativeStatusBarHiddenRef = (0, import_react.useRef)(null);
+	const outerScrollTrackerRef = (0, import_react.useRef)({
+		lastY: 0,
+		syncedVersion: 0
+	});
+	const containerScrollTrackerRef = (0, import_react.useRef)({
+		lastY: 0,
+		syncedVersion: 0
+	});
 	const isAnyModalOpenRef = (0, import_react.useRef)(false);
 	const handleEscapeRef = (0, import_react.useRef)(() => {});
 	const batchControlRef = (0, import_react.useRef)({
@@ -42498,6 +42511,9 @@ function App() {
 		cancelled: false
 	});
 	(0, import_react.useEffect)(() => {
+		chromeVisibleRef.current = chromeVisible;
+	}, [chromeVisible]);
+	(0, import_react.useEffect)(() => {
 		isAnyModalOpenRef.current = Boolean(apiSettingsOpen || shortcutsOpen || settingsOpen);
 	}, [
 		apiSettingsOpen,
@@ -42505,6 +42521,7 @@ function App() {
 		shortcutsOpen
 	]);
 	const effectiveChromeVisible = chromeVisible || settingsOpen || apiSettingsOpen || shortcutsOpen || drawerOpen || showBatchBar || sidebarMobileOpen || Boolean(loaderText);
+	const isImmersive = !effectiveChromeVisible || isFullscreen;
 	(0, import_react.useEffect)(() => {
 		readingModeRef.current = readingMode;
 		localStorage.setItem("reader_reading_mode", readingMode);
@@ -42723,22 +42740,48 @@ function App() {
 		const timer = setTimeout(safeResizeRendition, 120);
 		return () => clearTimeout(timer);
 	}, [contentWidth, safeResizeRendition]);
-	const shouldHideAndroidStatusBar = !effectiveChromeVisible || isFullscreen;
+	(0, import_react.useEffect)(() => {
+		immersiveTransitionVersionRef.current += 1;
+		immersiveTransitionUntilRef.current = Date.now() + 400;
+	}, [isImmersive]);
 	(0, import_react.useEffect)(() => {
 		if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android") return;
-		let cancelled = false;
-		const syncStatusBar = async () => {
-			try {
-				if (shouldHideAndroidStatusBar) await StatusBar.hide();
-				else await StatusBar.show();
-				if (!cancelled) setTimeout(safeResizeRendition, 140);
-			} catch {}
-		};
-		syncStatusBar();
-		return () => {
-			cancelled = true;
-		};
-	}, [safeResizeRendition, shouldHideAndroidStatusBar]);
+		if (lastNativeStatusBarHiddenRef.current === isImmersive) return;
+		lastNativeStatusBarHiddenRef.current = isImmersive;
+		if (isImmersive) StatusBar.hide().catch(() => {});
+		else StatusBar.show().catch(() => {});
+	}, [isImmersive]);
+	const setChromeVisibleGuarded = (0, import_react.useCallback)((nextVisible) => {
+		const now = Date.now();
+		if (now < immersiveTransitionUntilRef.current) return;
+		if (now - lastChromeToggleAtRef.current < 350) return;
+		if (chromeVisibleRef.current === nextVisible) return;
+		lastChromeToggleAtRef.current = now;
+		chromeVisibleRef.current = nextVisible;
+		setChromeVisible(nextVisible);
+	}, []);
+	const handleScrollMetric = (0, import_react.useCallback)((currentScrollY, tracker) => {
+		const now = Date.now();
+		const currentVersion = immersiveTransitionVersionRef.current;
+		if (now < immersiveTransitionUntilRef.current) {
+			tracker.lastY = currentScrollY;
+			tracker.syncedVersion = currentVersion;
+			return;
+		}
+		if (tracker.syncedVersion !== currentVersion) {
+			tracker.lastY = currentScrollY;
+			tracker.syncedVersion = currentVersion;
+			return;
+		}
+		const delta = currentScrollY - tracker.lastY;
+		if (Math.abs(delta) <= 40) return;
+		tracker.lastY = currentScrollY;
+		scrollLastTopRef.current = currentScrollY;
+		if (now - lastChromeToggleAtRef.current < 350) return;
+		if (currentScrollY <= 16) setChromeVisibleGuarded(true);
+		else if (delta > 40 && currentScrollY > 56) setChromeVisibleGuarded(false);
+		else if (delta < -40) setChromeVisibleGuarded(true);
+	}, [setChromeVisibleGuarded]);
 	const expandScrolledViews = (0, import_react.useCallback)(() => {
 		if (readerFlowRef.current !== "scroll") return;
 		const rendition = renditionRef.current;
@@ -42752,16 +42795,15 @@ function App() {
 		if (!container || scrollContainerBoundRef.current === container) return;
 		scrollContainerBoundRef.current = container;
 		scrollLastTopRef.current = container.scrollTop;
+		containerScrollTrackerRef.current = {
+			lastY: container.scrollTop,
+			syncedVersion: immersiveTransitionVersionRef.current
+		};
 		container.addEventListener("scroll", () => {
 			if (readerFlowRef.current !== "scroll") return;
-			const st = container.scrollTop;
-			const delta = st - scrollLastTopRef.current;
-			scrollLastTopRef.current = st;
-			if (st <= 16) setChromeVisible(true);
-			else if (delta > 18 && st > 56) setChromeVisible(false);
-			else if (delta < -28) setChromeVisible(true);
+			handleScrollMetric(container.scrollTop, containerScrollTrackerRef.current);
 		}, { passive: true });
-	}, []);
+	}, [handleScrollMetric]);
 	const scrollReaderVertical = (0, import_react.useCallback)((deltaY) => {
 		const container = viewerRef.current?.querySelector(".epub-container");
 		if (!container) return;
@@ -43261,7 +43303,7 @@ function App() {
 						if (moved || heldLong) return;
 					}
 					setSettingsOpen(false);
-					setChromeVisible((v) => !v);
+					setChromeVisibleGuarded(!chromeVisibleRef.current);
 				});
 				let touchStartX = 0;
 				let touchStartY = 0;
@@ -43277,9 +43319,9 @@ function App() {
 					const dx = e.changedTouches[0].clientX - touchStartX;
 					const dy = e.changedTouches[0].clientY - touchStartY;
 					if (doc.getSelection()?.toString().trim()) return;
-					if (readerFlowRef.current === "scroll" && Math.abs(dy) > 32 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-						if (dy < -32) setChromeVisible(false);
-						else if (dy > 36) setChromeVisible(true);
+					if (readerFlowRef.current === "scroll" && Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+						if (dy < -40) setChromeVisibleGuarded(false);
+						else if (dy > 40) setChromeVisibleGuarded(true);
 						return;
 					}
 					if (Date.now() - touchStartTime > 650) return;
@@ -43290,15 +43332,13 @@ function App() {
 				}, { passive: true });
 				const iframeWin = doc.defaultView;
 				if (iframeWin) {
-					let lastIframeScrollY = iframeWin.scrollY || 0;
+					const iframeTracker = {
+						lastY: iframeWin.scrollY || 0,
+						syncedVersion: immersiveTransitionVersionRef.current
+					};
 					iframeWin.addEventListener("scroll", () => {
 						if (readerFlowRef.current !== "scroll") return;
-						const sy = iframeWin.scrollY || 0;
-						const delta = sy - lastIframeScrollY;
-						lastIframeScrollY = sy;
-						if (sy <= 16) setChromeVisible(true);
-						else if (delta > 18 && sy > 56) setChromeVisible(false);
-						else if (delta < -28) setChromeVisible(true);
+						handleScrollMetric(iframeWin.scrollY || 0, iframeTracker);
 					}, { passive: true });
 				}
 			});
@@ -43843,7 +43883,7 @@ function App() {
 	};
 	const batchPct = batchState.total > 0 ? Math.round(batchState.completed / batchState.total * 100) : 0;
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "relative flex h-[100dvh] flex-col overflow-hidden select-none sm:select-auto",
+		className: "fixed inset-0 flex flex-col overflow-hidden select-none sm:select-auto",
 		onClick: () => setSettingsOpen(false),
 		onDragOver: (e) => {
 			e.preventDefault();
@@ -44139,9 +44179,13 @@ function App() {
 					},
 					onOpenShortcuts: () => setShortcutsOpen(true)
 				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("main", {
-					className: "relative flex min-w-0 flex-1 flex-col lg:flex-row",
+					className: "relative flex min-w-0 flex-1 flex-col overflow-hidden lg:flex-row",
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: "relative flex min-w-0 flex-1 flex-col items-center justify-center overflow-hidden",
+						onScroll: (e) => {
+							if (readerFlowRef.current !== "scroll") return;
+							handleScrollMetric(e.currentTarget.scrollTop, outerScrollTrackerRef.current);
+						},
+						className: "fixed inset-0 z-0 flex flex-col items-center overflow-y-auto lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden",
 						children: [
 							loaderText && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 								className: "absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-app)]/90 backdrop-blur-xs",

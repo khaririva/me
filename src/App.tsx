@@ -375,6 +375,19 @@ export default function App() {
   const backgroundPolishInFlightRef = useRef<Set<string>>(new Set());
   const scrollLastTopRef = useRef<number>(0);
   const scrollContainerBoundRef = useRef<HTMLElement | null>(null);
+  const chromeVisibleRef = useRef<boolean>(chromeVisible);
+  const lastChromeToggleAtRef = useRef<number>(0);
+  const immersiveTransitionUntilRef = useRef<number>(0);
+  const immersiveTransitionVersionRef = useRef<number>(0);
+  const lastNativeStatusBarHiddenRef = useRef<boolean | null>(null);
+  const outerScrollTrackerRef = useRef<{ lastY: number; syncedVersion: number }>({
+    lastY: 0,
+    syncedVersion: 0,
+  });
+  const containerScrollTrackerRef = useRef<{ lastY: number; syncedVersion: number }>({
+    lastY: 0,
+    syncedVersion: 0,
+  });
   const isAnyModalOpenRef = useRef<boolean>(false);
   const handleEscapeRef = useRef<() => void>(() => {});
   const batchControlRef = useRef<{ running: boolean; paused: boolean; cancelled: boolean }>({
@@ -382,6 +395,10 @@ export default function App() {
     paused: false,
     cancelled: false,
   });
+
+  useEffect(() => {
+    chromeVisibleRef.current = chromeVisible;
+  }, [chromeVisible]);
 
   useEffect(() => {
     isAnyModalOpenRef.current = Boolean(
@@ -398,6 +415,8 @@ export default function App() {
     showBatchBar ||
     sidebarMobileOpen ||
     Boolean(loaderText);
+
+  const isImmersive = !effectiveChromeVisible || isFullscreen;
 
   useEffect(() => {
     readingModeRef.current = readingMode;
@@ -664,30 +683,75 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [contentWidth, safeResizeRendition]);
 
-  // Sync Android Status Bar visibility with auto-hide toolbar & fullscreen state
-  const shouldHideAndroidStatusBar = !effectiveChromeVisible || isFullscreen;
+  // Ignore scroll changes for 400ms after immersive/StatusBar transitions to prevent viewport-resize feedback
+  useEffect(() => {
+    immersiveTransitionVersionRef.current += 1;
+    immersiveTransitionUntilRef.current = Date.now() + 400;
+  }, [isImmersive]);
+
+  // Sync Android Status Bar visibility strictly when immersive state changes
   useEffect(() => {
     if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
-    let cancelled = false;
-    const syncStatusBar = async () => {
-      try {
-        if (shouldHideAndroidStatusBar) {
-          await StatusBar.hide();
-        } else {
-          await StatusBar.show();
-        }
-        if (!cancelled) {
-          setTimeout(safeResizeRendition, 140);
-        }
-      } catch {
-        // ignore outside native Android runtime
+    if (lastNativeStatusBarHiddenRef.current === isImmersive) return;
+    lastNativeStatusBarHiddenRef.current = isImmersive;
+
+    if (isImmersive) {
+      void StatusBar.hide().catch(() => {});
+    } else {
+      void StatusBar.show().catch(() => {});
+    }
+  }, [isImmersive]);
+
+  const setChromeVisibleGuarded = useCallback((nextVisible: boolean) => {
+    const now = Date.now();
+    if (now < immersiveTransitionUntilRef.current) return;
+    if (now - lastChromeToggleAtRef.current < 350) return;
+    if (chromeVisibleRef.current === nextVisible) return;
+
+    lastChromeToggleAtRef.current = now;
+    chromeVisibleRef.current = nextVisible;
+    setChromeVisible(nextVisible);
+  }, []);
+
+  const handleScrollMetric = useCallback(
+    (currentScrollY: number, tracker: { lastY: number; syncedVersion: number }) => {
+      const now = Date.now();
+      const currentVersion = immersiveTransitionVersionRef.current;
+
+      if (now < immersiveTransitionUntilRef.current) {
+        tracker.lastY = currentScrollY;
+        tracker.syncedVersion = currentVersion;
+        return;
       }
-    };
-    void syncStatusBar();
-    return () => {
-      cancelled = true;
-    };
-  }, [safeResizeRendition, shouldHideAndroidStatusBar]);
+
+      if (tracker.syncedVersion !== currentVersion) {
+        tracker.lastY = currentScrollY;
+        tracker.syncedVersion = currentVersion;
+        return;
+      }
+
+      const delta = currentScrollY - tracker.lastY;
+      if (Math.abs(delta) <= 40) {
+        return;
+      }
+
+      tracker.lastY = currentScrollY;
+      scrollLastTopRef.current = currentScrollY;
+
+      if (now - lastChromeToggleAtRef.current < 350) {
+        return;
+      }
+
+      if (currentScrollY <= 16) {
+        setChromeVisibleGuarded(true);
+      } else if (delta > 40 && currentScrollY > 56) {
+        setChromeVisibleGuarded(false);
+      } else if (delta < -40) {
+        setChromeVisibleGuarded(true);
+      }
+    },
+    [setChromeVisibleGuarded]
+  );
 
   const expandScrolledViews = useCallback(() => {
     if (readerFlowRef.current !== 'scroll') return;
@@ -706,26 +770,20 @@ export default function App() {
     if (!container || scrollContainerBoundRef.current === container) return;
     scrollContainerBoundRef.current = container;
     scrollLastTopRef.current = container.scrollTop;
+    containerScrollTrackerRef.current = {
+      lastY: container.scrollTop,
+      syncedVersion: immersiveTransitionVersionRef.current,
+    };
 
     container.addEventListener(
       'scroll',
       () => {
         if (readerFlowRef.current !== 'scroll') return;
-        const st = container.scrollTop;
-        const delta = st - scrollLastTopRef.current;
-        scrollLastTopRef.current = st;
-
-        if (st <= 16) {
-          setChromeVisible(true);
-        } else if (delta > 18 && st > 56) {
-          setChromeVisible(false);
-        } else if (delta < -28) {
-          setChromeVisible(true);
-        }
+        handleScrollMetric(container.scrollTop, containerScrollTrackerRef.current);
       },
       { passive: true }
     );
-  }, []);
+  }, [handleScrollMetric]);
 
   const scrollReaderVertical = useCallback((deltaY: number) => {
     const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
@@ -1449,7 +1507,7 @@ export default function App() {
               if (moved || heldLong) return;
             }
             setSettingsOpen(false);
-            setChromeVisible((v) => !v);
+            setChromeVisibleGuarded(!chromeVisibleRef.current);
           });
 
           let touchStartX = 0;
@@ -1474,11 +1532,11 @@ export default function App() {
               const sel = doc.getSelection()?.toString().trim();
               if (sel) return;
 
-              if (readerFlowRef.current === 'scroll' && Math.abs(dy) > 32 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-                if (dy < -32) {
-                  setChromeVisible(false);
-                } else if (dy > 36) {
-                  setChromeVisible(true);
+              if (readerFlowRef.current === 'scroll' && Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+                if (dy < -40) {
+                  setChromeVisibleGuarded(false);
+                } else if (dy > 40) {
+                  setChromeVisibleGuarded(true);
                 }
                 return;
               }
@@ -1497,21 +1555,15 @@ export default function App() {
 
           const iframeWin = doc.defaultView;
           if (iframeWin) {
-            let lastIframeScrollY = iframeWin.scrollY || 0;
+            const iframeTracker = {
+              lastY: iframeWin.scrollY || 0,
+              syncedVersion: immersiveTransitionVersionRef.current,
+            };
             iframeWin.addEventListener(
               'scroll',
               () => {
                 if (readerFlowRef.current !== 'scroll') return;
-                const sy = iframeWin.scrollY || 0;
-                const delta = sy - lastIframeScrollY;
-                lastIframeScrollY = sy;
-                if (sy <= 16) {
-                  setChromeVisible(true);
-                } else if (delta > 18 && sy > 56) {
-                  setChromeVisible(false);
-                } else if (delta < -28) {
-                  setChromeVisible(true);
-                }
+                handleScrollMetric(iframeWin.scrollY || 0, iframeTracker);
               },
               { passive: true }
             );
@@ -2221,7 +2273,7 @@ export default function App() {
 
   return (
     <div
-      className="relative flex h-[100dvh] flex-col overflow-hidden select-none sm:select-auto"
+      className="fixed inset-0 flex flex-col overflow-hidden select-none sm:select-auto"
       onClick={() => setSettingsOpen(false)}
       onDragOver={(e) => {
         e.preventDefault();
@@ -2578,8 +2630,14 @@ export default function App() {
         />
 
         {/* Center Reader Stage + Right AI Drawer */}
-        <main className="relative flex min-w-0 flex-1 flex-col lg:flex-row">
-          <div className="relative flex min-w-0 flex-1 flex-col items-center justify-center overflow-hidden">
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden lg:flex-row">
+          <div
+            onScroll={(e) => {
+              if (readerFlowRef.current !== 'scroll') return;
+              handleScrollMetric(e.currentTarget.scrollTop, outerScrollTrackerRef.current);
+            }}
+            className="fixed inset-0 z-0 flex flex-col items-center overflow-y-auto lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden"
+          >
             {loaderText && (
               <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-app)]/90 backdrop-blur-xs">
                 <div className="h-9 w-9 animate-spin rounded-full border-3 border-blue-600 border-t-transparent" />
