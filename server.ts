@@ -9,7 +9,18 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT || 3000);
+function resolveCliFlag(flag: string): string | undefined {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && process.argv[idx + 1] && !process.argv[idx + 1].startsWith('-')) {
+    return process.argv[idx + 1];
+  }
+  const prefix = `${flag}=`;
+  const eqArg = process.argv.find((arg) => arg.startsWith(prefix));
+  return eqArg ? eqArg.slice(prefix.length) : undefined;
+}
+
+const PORT = Number(resolveCliFlag('--port') || process.env.PORT || 3000);
+const HOST = resolveCliFlag('--host') || process.env.HOST || '0.0.0.0';
 const DEFAULT_MODEL_NAME = 'gemini-4-hydrogen';
 
 function getEnvApiKey(): string {
@@ -459,9 +470,12 @@ export class ErrorOverlay extends HTMLElement {}
     });
   }
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`PustakaLoka server listening on http://localhost:${PORT}`);
+  httpServer.listen(PORT, HOST, () => {
+    console.log(`PustakaLoka server listening on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   });
 }
 
-createServer();
+createServer().catch((err) => {
+  console.error('Failed to start PustakaLoka server:', err);
+  process.exit(1);
+});
