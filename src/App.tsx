@@ -34,8 +34,11 @@ import {
   translateVocabApi,
 } from './lib/api';
 import { SAMPLE_BOOK_ID, createSampleEpubBuffer } from './lib/sampleEpub';
+import { applyEpubJsFixes } from './lib/patchEpubJs';
 import { BookTranslationDB, LibraryDB } from './lib/storage';
 import { sanitizeTextForTranslation } from './lib/textSanitize';
+
+applyEpubJsFixes();
 import type {
   BatchJobState,
   BookmarkItem,
@@ -377,15 +380,19 @@ export default function App() {
   const scrollContainerBoundRef = useRef<HTMLElement | null>(null);
   const chromeVisibleRef = useRef<boolean>(chromeVisible);
   const lastChromeToggleAtRef = useRef<number>(0);
+  const lastTapToggleAtRef = useRef<number>(0);
   const immersiveTransitionUntilRef = useRef<number>(0);
   const immersiveTransitionVersionRef = useRef<number>(0);
   const lastNativeStatusBarHiddenRef = useRef<boolean | null>(null);
-  const outerScrollTrackerRef = useRef<{ lastY: number; syncedVersion: number }>({
+  const lastViewerSizeRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
+  const outerScrollTrackerRef = useRef<{ lastY: number; downwardAccum: number; syncedVersion: number }>({
     lastY: 0,
+    downwardAccum: 0,
     syncedVersion: 0,
   });
-  const containerScrollTrackerRef = useRef<{ lastY: number; syncedVersion: number }>({
+  const containerScrollTrackerRef = useRef<{ lastY: number; downwardAccum: number; syncedVersion: number }>({
     lastY: 0,
+    downwardAccum: 0,
     syncedVersion: 0,
   });
   const isAnyModalOpenRef = useRef<boolean>(false);
@@ -663,15 +670,34 @@ export default function App() {
     applyRenditionStyling();
   }, [applyRenditionStyling]);
 
-  const safeResizeRendition = useCallback(() => {
+  const safeResizeRendition = useCallback((force = false) => {
     const rendition = renditionRef.current as
       | (Rendition & { manager?: { resize?: unknown } })
       | null;
     const container = viewerRef.current;
     if (!rendition || !rendition.manager || !container) return;
-    if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
+    const nextWidth = container.clientWidth;
+    const nextHeight = container.clientHeight;
+    if (nextWidth <= 0 || nextHeight <= 0) return;
+
+    const prev = lastViewerSizeRef.current;
+    const widthChanged = Math.abs(nextWidth - prev.width) > 2;
+    const heightDiff = Math.abs(nextHeight - prev.height);
+
+    // Skip no-op resizes when container dimensions have not changed
+    if (prev.width > 0 && Math.abs(nextWidth - prev.width) <= 1 && Math.abs(nextHeight - prev.height) <= 1) {
+      return;
+    }
+
+    // Avoid EPUB.js re-layout on Android StatusBar height transitions to prevent white flashes and scroll resets
+    if (!force && prev.width > 0 && !widthChanged) {
+      if (readerFlowRef.current === 'scroll') return;
+      if (Date.now() < immersiveTransitionUntilRef.current || heightDiff < 96) return;
+    }
+
+    lastViewerSizeRef.current = { width: nextWidth, height: nextHeight };
     try {
-      rendition.resize(container.clientWidth, container.clientHeight);
+      rendition.resize(nextWidth, nextHeight);
     } catch {
       // ignore transient resize errors while switching books
     }
@@ -679,7 +705,7 @@ export default function App() {
 
   // Re-measure rendition cleanly when reading column width changes in paginated mode
   useEffect(() => {
-    const timer = setTimeout(safeResizeRendition, 120);
+    const timer = setTimeout(() => safeResizeRendition(true), 120);
     return () => clearTimeout(timer);
   }, [contentWidth, safeResizeRendition]);
 
@@ -713,41 +739,64 @@ export default function App() {
     setChromeVisible(nextVisible);
   }, []);
 
+  const toggleChromeByTap = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTapToggleAtRef.current < 180) return;
+    lastTapToggleAtRef.current = now;
+    lastChromeToggleAtRef.current = now;
+    const next = !chromeVisibleRef.current;
+    chromeVisibleRef.current = next;
+    setChromeVisible(next);
+  }, []);
+
   const handleScrollMetric = useCallback(
-    (currentScrollY: number, tracker: { lastY: number; syncedVersion: number }) => {
+    (
+      currentScrollY: number,
+      tracker: { lastY: number; downwardAccum: number; syncedVersion: number }
+    ) => {
       const now = Date.now();
       const currentVersion = immersiveTransitionVersionRef.current;
 
       if (now < immersiveTransitionUntilRef.current) {
         tracker.lastY = currentScrollY;
+        tracker.downwardAccum = 0;
         tracker.syncedVersion = currentVersion;
         return;
       }
 
       if (tracker.syncedVersion !== currentVersion) {
         tracker.lastY = currentScrollY;
+        tracker.downwardAccum = 0;
         tracker.syncedVersion = currentVersion;
         return;
       }
 
-      const delta = currentScrollY - tracker.lastY;
-      if (Math.abs(delta) <= 40) {
-        return;
-      }
-
+      const step = currentScrollY - tracker.lastY;
       tracker.lastY = currentScrollY;
       scrollLastTopRef.current = currentScrollY;
 
-      if (now - lastChromeToggleAtRef.current < 350) {
+      if (currentScrollY <= 10) {
+        tracker.downwardAccum = 0;
+        if (!chromeVisibleRef.current && now - lastChromeToggleAtRef.current >= 350) {
+          setChromeVisibleGuarded(true);
+        }
         return;
       }
 
-      if (currentScrollY <= 16) {
-        setChromeVisibleGuarded(true);
-      } else if (delta > 40 && currentScrollY > 56) {
-        setChromeVisibleGuarded(false);
-      } else if (delta < -40) {
-        setChromeVisibleGuarded(true);
+      if (step > 0) {
+        tracker.downwardAccum += step;
+        if (
+          tracker.downwardAccum > 80 &&
+          currentScrollY > 80 &&
+          chromeVisibleRef.current &&
+          now - lastChromeToggleAtRef.current >= 350
+        ) {
+          tracker.downwardAccum = 0;
+          setChromeVisibleGuarded(false);
+        }
+      } else if (step < 0) {
+        // Do not auto-show toolbar/StatusBar on small upward scroll; wait until scrollTop <= 10 or user tap
+        tracker.downwardAccum = 0;
       }
     },
     [setChromeVisibleGuarded]
@@ -772,6 +821,7 @@ export default function App() {
     scrollLastTopRef.current = container.scrollTop;
     containerScrollTrackerRef.current = {
       lastY: container.scrollTop,
+      downwardAccum: 0,
       syncedVersion: immersiveTransitionVersionRef.current,
     };
 
@@ -1359,6 +1409,10 @@ export default function App() {
           flow: readerFlowRef.current === 'scroll' ? 'scrolled-doc' : 'paginated',
         });
         renditionRef.current = rendition;
+        lastViewerSizeRef.current = {
+          width: viewerRef.current.clientWidth,
+          height: viewerRef.current.clientHeight,
+        };
         applyRenditionStyling();
 
         const navigation = await book.loaded.navigation;
@@ -1507,7 +1561,7 @@ export default function App() {
               if (moved || heldLong) return;
             }
             setSettingsOpen(false);
-            setChromeVisibleGuarded(!chromeVisibleRef.current);
+            toggleChromeByTap();
           });
 
           let touchStartX = 0;
@@ -1532,12 +1586,8 @@ export default function App() {
               const sel = doc.getSelection()?.toString().trim();
               if (sel) return;
 
-              if (readerFlowRef.current === 'scroll' && Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-                if (dy < -40) {
-                  setChromeVisibleGuarded(false);
-                } else if (dy > 40) {
-                  setChromeVisibleGuarded(true);
-                }
+              if (readerFlowRef.current === 'scroll' && dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+                setChromeVisibleGuarded(false);
                 return;
               }
 
@@ -1557,6 +1607,7 @@ export default function App() {
           if (iframeWin) {
             const iframeTracker = {
               lastY: iframeWin.scrollY || 0,
+              downwardAccum: 0,
               syncedVersion: immersiveTransitionVersionRef.current,
             };
             iframeWin.addEventListener(
@@ -1571,7 +1622,16 @@ export default function App() {
         });
 
         const savedCfi = localStorage.getItem(`reader_pos_${resolvedId}`);
-        await rendition.display(savedCfi || undefined);
+        try {
+          await rendition.display(savedCfi || undefined);
+        } catch {
+          if (savedCfi) {
+            localStorage.removeItem(`reader_pos_${resolvedId}`);
+            await rendition.display();
+          } else {
+            throw new Error('Failed to render initial EPUB view');
+          }
+        }
 
         locationsReadyRef.current = false;
         setLocationsReady(false);
@@ -1672,13 +1732,15 @@ export default function App() {
     });
   }, [loadEpubBook, showToast]);
 
-  // Resize EPUB rendition cleanly & track mobile viewport width
+  // Resize EPUB rendition cleanly only on actual horizontal/desktop layout shifts
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     const handleResize = () => {
-      setIsMobileViewport(window.innerWidth < 640);
+      const nextIsMobile = window.innerWidth < 640;
+      setIsMobileViewport((prev) => (prev === nextIsMobile ? prev : nextIsMobile));
+      if (Date.now() < immersiveTransitionUntilRef.current) return;
       clearTimeout(timer);
-      timer = setTimeout(safeResizeRendition, 180);
+      timer = setTimeout(() => safeResizeRendition(false), 200);
     };
     window.addEventListener('resize', handleResize);
     return () => {
@@ -1688,7 +1750,7 @@ export default function App() {
   }, [safeResizeRendition]);
 
   useEffect(() => {
-    const timer = setTimeout(safeResizeRendition, 220);
+    const timer = setTimeout(() => safeResizeRendition(true), 220);
     return () => clearTimeout(timer);
   }, [sidebarDesktopOpen, drawerOpen, safeResizeRendition]);
 
@@ -2342,25 +2404,23 @@ export default function App() {
       )}
 
       {/* Hover Reveal Strip at Top Edge on Desktop when auto-hidden */}
-      {!effectiveChromeVisible && (
-        <div
-          onMouseEnter={() => setChromeVisible(true)}
-          onClick={() => setChromeVisible(true)}
-          className="fixed inset-x-0 top-0 z-30 h-5 cursor-pointer"
-          aria-hidden="true"
-        />
-      )}
+      <div
+        onMouseEnter={() => setChromeVisible(true)}
+        onClick={() => setChromeVisible(true)}
+        className={`fixed inset-x-0 top-0 z-30 h-5 cursor-pointer ${
+          effectiveChromeVisible ? 'pointer-events-none' : 'pointer-events-auto'
+        }`}
+        aria-hidden="true"
+      />
 
       {/* Floating Minimalist Auto-Hide Top Bar */}
       <header
-        className={`mac-surface fixed inset-x-0 top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between gap-1 border-b pt-[env(safe-area-inset-top)] backdrop-blur-md transition-all duration-200 sm:gap-3 ${
+        className={`mac-surface fixed inset-x-0 top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between gap-1 border-b pt-[env(safe-area-inset-top)] backdrop-blur-md transition-transform duration-200 will-change-transform sm:gap-3 ${
           isElectron ? 'mac-drag-region' : ''
         } ${
           isElectron && !isFullscreen ? 'pl-20 pr-3 sm:pr-5' : 'px-1.5 sm:px-5'
         } ${
-          effectiveChromeVisible
-            ? 'translate-y-0 opacity-100'
-            : '-translate-y-full pointer-events-none opacity-0'
+          effectiveChromeVisible ? 'translate-y-0' : '-translate-y-full pointer-events-none'
         }`}
         style={{ backgroundColor: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)' }}
       >
@@ -2427,7 +2487,12 @@ export default function App() {
             aria-label="Terjemahkan Bab Aktif"
             className="flex min-h-[32px] shrink-0 items-center gap-1.5 rounded-xl bg-blue-600 px-2 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap sm:min-h-[36px] sm:px-3"
           >
-            <Sparkles className="h-3.5 w-3.5" />
+            {readingMode !== 'original' &&
+            (chapterPolishStatus === 'drafting' || chapterPolishStatus === 'polishing') ? (
+              <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white border-t-transparent" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
             <span className="hidden sm:inline">Terjemahkan</span>
           </button>
 
@@ -2613,7 +2678,9 @@ export default function App() {
           toc={toc}
           onSelectTocHref={handleSelectTocHref}
           bookmarks={bookmarks}
-          onSelectBookmark={(cfi) => renditionRef.current?.display(cfi)}
+          onSelectBookmark={(cfi) => {
+            void renditionRef.current?.display(cfi).catch(() => {});
+          }}
           onDeleteBookmark={(id) => {
             const next = bookmarks.filter((b) => b.id !== id);
             setBookmarks(next);
@@ -2636,7 +2703,7 @@ export default function App() {
               if (readerFlowRef.current !== 'scroll') return;
               handleScrollMetric(e.currentTarget.scrollTop, outerScrollTrackerRef.current);
             }}
-            className="fixed inset-0 z-0 flex flex-col items-center overflow-y-auto lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden"
+            className="fixed inset-0 z-0 flex flex-col items-center overflow-y-auto overscroll-y-contain bg-[var(--bg-reader)] lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden"
           >
             {loaderText && (
               <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-app)]/90 backdrop-blur-xs">
@@ -2652,47 +2719,6 @@ export default function App() {
                 readerFlow === 'paginated' ? CONTENT_WIDTH_CLASS[contentWidth] : 'max-w-none'
               }`}
             />
-
-            {/* Unobtrusive Two-Stage Hybrid Translation Status */}
-            {readingMode !== 'original' && chapterPolishStatus !== 'idle' && (
-              <div
-                aria-live="polite"
-                className={`fixed right-4 z-20 flex items-center gap-1.5 text-[11px] font-semibold transition-all duration-200 ${
-                  chapterPolishStatus === 'draft-only' ? 'pointer-events-auto' : 'pointer-events-none'
-                } ${
-                  effectiveChromeVisible ? 'bottom-14 sm:bottom-14' : 'bottom-3'
-                } ${
-                  chapterPolishStatus === 'polished'
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : chapterPolishStatus === 'polishing' || chapterPolishStatus === 'drafting'
-                    ? 'text-blue-600 dark:text-blue-400'
-                    : 'text-[var(--text-secondary)]'
-                }`}
-              >
-                {(chapterPolishStatus === 'drafting' || chapterPolishStatus === 'polishing') && (
-                  <span className="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" />
-                )}
-                {chapterPolishStatus === 'drafting' && <span>Draf Instan...</span>}
-                {chapterPolishStatus === 'polishing' && <span>Draf Instan · Memperhalus AI...</span>}
-                {chapterPolishStatus === 'polished' && <span>AI Polished ✨</span>}
-                {chapterPolishStatus === 'draft-only' && (
-                  <button
-                    type="button"
-                    title={polishFallbackReason || 'Draf Terjemahan Instan · Ketuk untuk Pengaturan AI'}
-                    onClick={() => {
-                      if (polishFallbackReason) {
-                        showToast(polishFallbackReason, 'info');
-                      } else {
-                        setApiSettingsOpen(true);
-                      }
-                    }}
-                    className="rounded-md px-1.5 py-0.5 transition hover:bg-slate-500/10"
-                  >
-                    Terjemahan Instan
-                  </button>
-                )}
-              </div>
-            )}
 
             {/* Floating Selection Popover */}
             {popoverPos && (
@@ -2759,23 +2785,57 @@ export default function App() {
       </div>
 
       {/* Hover Reveal Strip at Bottom Edge on Desktop when auto-hidden */}
-      {!effectiveChromeVisible && (
+      <div
+        onMouseEnter={() => setChromeVisible(true)}
+        onClick={() => setChromeVisible(true)}
+        className={`fixed inset-x-0 bottom-0 z-10 h-5 cursor-pointer ${
+          effectiveChromeVisible ? 'pointer-events-none' : 'pointer-events-auto'
+        }`}
+        aria-hidden="true"
+      />
+
+      {/* Translation Status Badge: tucked behind solid footer in normal mode, visible in fullscreen */}
+      {readingMode !== 'original' && chapterPolishStatus !== 'idle' && (
         <div
-          onMouseEnter={() => setChromeVisible(true)}
-          onClick={() => setChromeVisible(true)}
-          className="fixed inset-x-0 bottom-0 z-30 h-5 cursor-pointer"
-          aria-hidden="true"
-        />
+          aria-live="polite"
+          className={`mac-surface fixed bottom-[max(0.6rem,env(safe-area-inset-bottom))] right-3 z-20 flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-semibold shadow-md sm:bottom-3 sm:right-4 ${
+            chapterPolishStatus === 'polished'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : chapterPolishStatus === 'polishing' || chapterPolishStatus === 'drafting'
+              ? 'text-blue-600 dark:text-blue-400'
+              : 'text-[var(--text-secondary)]'
+          }`}
+        >
+          {(chapterPolishStatus === 'drafting' || chapterPolishStatus === 'polishing') && (
+            <span className="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" />
+          )}
+          {chapterPolishStatus === 'drafting' && <span>Menyiapkan draf...</span>}
+          {chapterPolishStatus === 'polishing' && <span>Memperhalus AI...</span>}
+          {chapterPolishStatus === 'polished' && <span>AI Polished ✨</span>}
+          {chapterPolishStatus === 'draft-only' && (
+            <button
+              type="button"
+              title={polishFallbackReason || 'Draf Terjemahan Instan · Ketuk untuk Pengaturan AI'}
+              onClick={() => {
+                if (polishFallbackReason) {
+                  showToast(polishFallbackReason, 'info');
+                } else {
+                  setApiSettingsOpen(true);
+                }
+              }}
+              className="transition hover:underline"
+            >
+              Terjemahan Instan
+            </button>
+          )}
+        </div>
       )}
 
-      {/* Floating Minimalist Auto-Hide Bottom Bar */}
+      {/* Floating Minimalist Auto-Hide Bottom Bar (solid background & higher z-index to cover status badge) */}
       <footer
-        className={`mac-surface fixed inset-x-0 bottom-0 z-30 border-t px-3 pb-[max(0.4rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-md transition-all duration-200 sm:px-5 sm:py-2 ${
-          effectiveChromeVisible
-            ? 'translate-y-0 opacity-100'
-            : 'translate-y-full pointer-events-none opacity-0'
+        className={`mac-surface fixed inset-x-0 bottom-0 z-40 border-t bg-[var(--bg-surface)] px-3 pb-[max(0.4rem,env(safe-area-inset-bottom))] pt-1.5 transition-transform duration-200 will-change-transform sm:px-5 sm:py-2 ${
+          effectiveChromeVisible ? 'translate-y-0' : 'translate-y-full pointer-events-none'
         }`}
-        style={{ backgroundColor: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)' }}
       >
         <div className="mx-auto flex max-w-4xl items-center gap-2.5 sm:gap-4">
           <button
@@ -2804,7 +2864,7 @@ export default function App() {
                 if (!bookRef.current || !locationsReady) return;
                 const pct = parseInt(e.target.value, 10) / 100;
                 const cfi = bookRef.current.locations.cfiFromPercentage(pct);
-                if (cfi) renditionRef.current?.display(cfi);
+                if (cfi) void renditionRef.current?.display(cfi).catch(() => {});
               }}
               aria-label="Progres Membaca"
               className="h-1.5 flex-1 cursor-pointer rounded-lg accent-blue-600"

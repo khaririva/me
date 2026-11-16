@@ -42169,6 +42169,118 @@ async function createSampleEpubBuffer() {
 </html>`);
 	return await zip.generateAsync({ type: "arraybuffer" });
 }
+// src/lib/patchEpubJs.ts
+var patched = false;
+/**
+* Patches upstream epubjs@0.3.93 runtime bugs:
+* 1. Contents.prototype.locationOf assumes startContainer is always a Text node
+*    when expanding a collapsed Range, calling range.setEnd(el, textContent.length)
+*    on Element nodes or out-of-bounds offsets (e.g. after DOM translation injection)
+*    and logging "setting end offset to start container length failed".
+* 2. EpubCFI.prototype.toRange can throw when fixMiss receives an invalid node/offset.
+*/
+function applyEpubJsFixes() {
+	if (patched) return;
+	patched = true;
+	const hasNavigator = typeof navigator !== "undefined";
+	const isChrome = hasNavigator && /Chrome/.test(navigator.userAgent);
+	const isWebkit = hasNavigator && !isChrome && /AppleWebKit/.test(navigator.userAgent);
+	const cfiProto = EpubCFI.prototype;
+	const originalToRange = cfiProto.toRange;
+	cfiProto.toRange = function patchedToRange(_doc, ignoreClass) {
+		try {
+			return originalToRange.call(this, _doc, ignoreClass);
+		} catch {
+			const doc = _doc || (typeof document !== "undefined" ? document : null);
+			if (!doc) return null;
+			try {
+				const range = doc.createRange();
+				const fallbackNode = doc.body || doc.documentElement;
+				if (fallbackNode) {
+					range.selectNodeContents(fallbackNode);
+					range.collapse(true);
+					return range;
+				}
+			} catch {}
+			return null;
+		}
+	};
+	const contentsProto = Contents.prototype;
+	contentsProto.locationOf = function safeLocationOf(target, ignoreClass) {
+		let position;
+		const targetPos = {
+			left: 0,
+			top: 0
+		};
+		if (!this.document) return targetPos;
+		if (typeof target === "string" && this.epubcfi.isCfiString(target)) {
+			let range = null;
+			try {
+				range = new EpubCFI(target).toRange(this.document, ignoreClass);
+			} catch {
+				range = null;
+			}
+			if (range) {
+				try {
+					if (!range.endContainer || range.startContainer === range.endContainer && range.startOffset === range.endOffset) {
+						if (range.startContainer.nodeType === Node.TEXT_NODE) {
+							const textContent = range.startContainer.textContent || "";
+							const textLen = textContent.length;
+							const clampedStart = Math.max(0, Math.min(range.startOffset, textLen));
+							if (clampedStart !== range.startOffset) range.setStart(range.startContainer, clampedStart);
+							let pos = textContent.indexOf(" ", clampedStart);
+							if (pos === -1 || pos > textLen) pos = textLen;
+							if (pos >= clampedStart) range.setEnd(range.startContainer, pos);
+						} else if (range.startContainer.nodeType === Node.ELEMENT_NODE) {
+							const childLen = range.startContainer.childNodes.length;
+							const clampedStart = Math.max(0, Math.min(range.startOffset, childLen));
+							if (clampedStart !== range.startOffset) range.setStart(range.startContainer, clampedStart);
+							range.setEnd(range.startContainer, Math.min(clampedStart + 1, childLen));
+						}
+					}
+				} catch {}
+				if (range.startContainer.nodeType === Node.ELEMENT_NODE) position = range.startContainer.getBoundingClientRect();
+				else if (isWebkit) {
+					const container = range.startContainer;
+					const newRange = this.document.createRange();
+					try {
+						const containerLen = container.length ?? container.textContent?.length ?? 0;
+						const startOffset = Math.max(0, Math.min(range.startOffset, containerLen));
+						if (startOffset + 2 <= containerLen) {
+							newRange.setStart(container, startOffset);
+							newRange.setEnd(container, startOffset + 2);
+							position = newRange.getBoundingClientRect();
+						} else if (startOffset - 2 >= 0) {
+							newRange.setStart(container, startOffset - 2);
+							newRange.setEnd(container, startOffset);
+							position = newRange.getBoundingClientRect();
+						} else if (container.parentElement) position = container.parentElement.getBoundingClientRect();
+					} catch {
+						if (container.parentElement) position = container.parentElement.getBoundingClientRect();
+					}
+				} else {
+					position = range.getBoundingClientRect();
+					if (range.collapsed && range.startContainer.parentElement) position = range.startContainer.parentElement.getBoundingClientRect();
+				}
+			}
+		} else if (typeof target === "string" && target.indexOf("#") > -1) {
+			const id = target.substring(target.indexOf("#") + 1);
+			const el = this.document.getElementById(id);
+			if (el) {
+				if (isWebkit) {
+					const newRange = this.document.createRange();
+					newRange.selectNode(el);
+					position = newRange.getBoundingClientRect();
+				} else position = el.getBoundingClientRect();
+			}
+		}
+		if (position) {
+			targetPos.left = position.left;
+			targetPos.top = position.top;
+		}
+		return targetPos;
+	};
+}
 // src/lib/storage.ts
 var DB_NAME = "PustakaMacDB";
 var DB_VERSION = 2;
@@ -42288,6 +42400,7 @@ var LibraryDB = {
 	}
 };
 // src/App.tsx
+applyEpubJsFixes();
 var BLOCK_SELECTOR = "p, h1, h2, h3, h4, h5, h6, li, blockquote";
 var CONTENT_WIDTH_PX = {
 	narrow: 620,
@@ -42492,15 +42605,22 @@ function App() {
 	const scrollContainerBoundRef = (0, import_react.useRef)(null);
 	const chromeVisibleRef = (0, import_react.useRef)(chromeVisible);
 	const lastChromeToggleAtRef = (0, import_react.useRef)(0);
+	const lastTapToggleAtRef = (0, import_react.useRef)(0);
 	const immersiveTransitionUntilRef = (0, import_react.useRef)(0);
 	const immersiveTransitionVersionRef = (0, import_react.useRef)(0);
 	const lastNativeStatusBarHiddenRef = (0, import_react.useRef)(null);
+	const lastViewerSizeRef = (0, import_react.useRef)({
+		width: 0,
+		height: 0
+	});
 	const outerScrollTrackerRef = (0, import_react.useRef)({
 		lastY: 0,
+		downwardAccum: 0,
 		syncedVersion: 0
 	});
 	const containerScrollTrackerRef = (0, import_react.useRef)({
 		lastY: 0,
+		downwardAccum: 0,
 		syncedVersion: 0
 	});
 	const isAnyModalOpenRef = (0, import_react.useRef)(false);
@@ -42727,17 +42847,31 @@ function App() {
 	(0, import_react.useEffect)(() => {
 		applyRenditionStyling();
 	}, [applyRenditionStyling]);
-	const safeResizeRendition = (0, import_react.useCallback)(() => {
+	const safeResizeRendition = (0, import_react.useCallback)((force = false) => {
 		const rendition = renditionRef.current;
 		const container = viewerRef.current;
 		if (!rendition || !rendition.manager || !container) return;
-		if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
+		const nextWidth = container.clientWidth;
+		const nextHeight = container.clientHeight;
+		if (nextWidth <= 0 || nextHeight <= 0) return;
+		const prev = lastViewerSizeRef.current;
+		const widthChanged = Math.abs(nextWidth - prev.width) > 2;
+		const heightDiff = Math.abs(nextHeight - prev.height);
+		if (prev.width > 0 && Math.abs(nextWidth - prev.width) <= 1 && Math.abs(nextHeight - prev.height) <= 1) return;
+		if (!force && prev.width > 0 && !widthChanged) {
+			if (readerFlowRef.current === "scroll") return;
+			if (Date.now() < immersiveTransitionUntilRef.current || heightDiff < 96) return;
+		}
+		lastViewerSizeRef.current = {
+			width: nextWidth,
+			height: nextHeight
+		};
 		try {
-			rendition.resize(container.clientWidth, container.clientHeight);
+			rendition.resize(nextWidth, nextHeight);
 		} catch {}
 	}, []);
 	(0, import_react.useEffect)(() => {
-		const timer = setTimeout(safeResizeRendition, 120);
+		const timer = setTimeout(() => safeResizeRendition(true), 120);
 		return () => clearTimeout(timer);
 	}, [contentWidth, safeResizeRendition]);
 	(0, import_react.useEffect)(() => {
@@ -42760,27 +42894,45 @@ function App() {
 		chromeVisibleRef.current = nextVisible;
 		setChromeVisible(nextVisible);
 	}, []);
+	const toggleChromeByTap = (0, import_react.useCallback)(() => {
+		const now = Date.now();
+		if (now - lastTapToggleAtRef.current < 180) return;
+		lastTapToggleAtRef.current = now;
+		lastChromeToggleAtRef.current = now;
+		const next = !chromeVisibleRef.current;
+		chromeVisibleRef.current = next;
+		setChromeVisible(next);
+	}, []);
 	const handleScrollMetric = (0, import_react.useCallback)((currentScrollY, tracker) => {
 		const now = Date.now();
 		const currentVersion = immersiveTransitionVersionRef.current;
 		if (now < immersiveTransitionUntilRef.current) {
 			tracker.lastY = currentScrollY;
+			tracker.downwardAccum = 0;
 			tracker.syncedVersion = currentVersion;
 			return;
 		}
 		if (tracker.syncedVersion !== currentVersion) {
 			tracker.lastY = currentScrollY;
+			tracker.downwardAccum = 0;
 			tracker.syncedVersion = currentVersion;
 			return;
 		}
-		const delta = currentScrollY - tracker.lastY;
-		if (Math.abs(delta) <= 40) return;
+		const step = currentScrollY - tracker.lastY;
 		tracker.lastY = currentScrollY;
 		scrollLastTopRef.current = currentScrollY;
-		if (now - lastChromeToggleAtRef.current < 350) return;
-		if (currentScrollY <= 16) setChromeVisibleGuarded(true);
-		else if (delta > 40 && currentScrollY > 56) setChromeVisibleGuarded(false);
-		else if (delta < -40) setChromeVisibleGuarded(true);
+		if (currentScrollY <= 10) {
+			tracker.downwardAccum = 0;
+			if (!chromeVisibleRef.current && now - lastChromeToggleAtRef.current >= 350) setChromeVisibleGuarded(true);
+			return;
+		}
+		if (step > 0) {
+			tracker.downwardAccum += step;
+			if (tracker.downwardAccum > 80 && currentScrollY > 80 && chromeVisibleRef.current && now - lastChromeToggleAtRef.current >= 350) {
+				tracker.downwardAccum = 0;
+				setChromeVisibleGuarded(false);
+			}
+		} else if (step < 0) tracker.downwardAccum = 0;
 	}, [setChromeVisibleGuarded]);
 	const expandScrolledViews = (0, import_react.useCallback)(() => {
 		if (readerFlowRef.current !== "scroll") return;
@@ -42797,6 +42949,7 @@ function App() {
 		scrollLastTopRef.current = container.scrollTop;
 		containerScrollTrackerRef.current = {
 			lastY: container.scrollTop,
+			downwardAccum: 0,
 			syncedVersion: immersiveTransitionVersionRef.current
 		};
 		container.addEventListener("scroll", () => {
@@ -43190,6 +43343,10 @@ function App() {
 				flow: readerFlowRef.current === "scroll" ? "scrolled-doc" : "paginated"
 			});
 			renditionRef.current = rendition;
+			lastViewerSizeRef.current = {
+				width: viewerRef.current.clientWidth,
+				height: viewerRef.current.clientHeight
+			};
 			applyRenditionStyling();
 			const tocList = (await book.loaded.navigation).toc || [];
 			setToc(tocList);
@@ -43303,7 +43460,7 @@ function App() {
 						if (moved || heldLong) return;
 					}
 					setSettingsOpen(false);
-					setChromeVisibleGuarded(!chromeVisibleRef.current);
+					toggleChromeByTap();
 				});
 				let touchStartX = 0;
 				let touchStartY = 0;
@@ -43319,9 +43476,8 @@ function App() {
 					const dx = e.changedTouches[0].clientX - touchStartX;
 					const dy = e.changedTouches[0].clientY - touchStartY;
 					if (doc.getSelection()?.toString().trim()) return;
-					if (readerFlowRef.current === "scroll" && Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-						if (dy < -40) setChromeVisibleGuarded(false);
-						else if (dy > 40) setChromeVisibleGuarded(true);
+					if (readerFlowRef.current === "scroll" && dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+						setChromeVisibleGuarded(false);
 						return;
 					}
 					if (Date.now() - touchStartTime > 650) return;
@@ -43334,6 +43490,7 @@ function App() {
 				if (iframeWin) {
 					const iframeTracker = {
 						lastY: iframeWin.scrollY || 0,
+						downwardAccum: 0,
 						syncedVersion: immersiveTransitionVersionRef.current
 					};
 					iframeWin.addEventListener("scroll", () => {
@@ -43343,7 +43500,14 @@ function App() {
 				}
 			});
 			const savedCfi = localStorage.getItem(`reader_pos_${resolvedId}`);
-			await rendition.display(savedCfi || void 0);
+			try {
+				await rendition.display(savedCfi || void 0);
+			} catch {
+				if (savedCfi) {
+					localStorage.removeItem(`reader_pos_${resolvedId}`);
+					await rendition.display();
+				} else throw new Error("Failed to render initial EPUB view");
+			}
 			locationsReadyRef.current = false;
 			setLocationsReady(false);
 			book.locations.generate(1200).then(() => {
@@ -43426,9 +43590,11 @@ function App() {
 	(0, import_react.useEffect)(() => {
 		let timer;
 		const handleResize = () => {
-			setIsMobileViewport(window.innerWidth < 640);
+			const nextIsMobile = window.innerWidth < 640;
+			setIsMobileViewport((prev) => prev === nextIsMobile ? prev : nextIsMobile);
+			if (Date.now() < immersiveTransitionUntilRef.current) return;
 			clearTimeout(timer);
-			timer = setTimeout(safeResizeRendition, 180);
+			timer = setTimeout(() => safeResizeRendition(false), 200);
 		};
 		window.addEventListener("resize", handleResize);
 		return () => {
@@ -43437,7 +43603,7 @@ function App() {
 		};
 	}, [safeResizeRendition]);
 	(0, import_react.useEffect)(() => {
-		const timer = setTimeout(safeResizeRendition, 220);
+		const timer = setTimeout(() => safeResizeRendition(true), 220);
 		return () => clearTimeout(timer);
 	}, [
 		sidebarDesktopOpen,
@@ -43938,14 +44104,14 @@ function App() {
 				className: "fixed bottom-16 left-3 z-50 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-600 px-2.5 py-1 text-[11px] font-semibold text-white shadow-md sm:left-4",
 				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(WifiOff, { className: "h-3 w-3" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Mode Luring" })]
 			}),
-			!effectiveChromeVisible && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 				onMouseEnter: () => setChromeVisible(true),
 				onClick: () => setChromeVisible(true),
-				className: "fixed inset-x-0 top-0 z-30 h-5 cursor-pointer",
+				className: `fixed inset-x-0 top-0 z-30 h-5 cursor-pointer ${effectiveChromeVisible ? "pointer-events-none" : "pointer-events-auto"}`,
 				"aria-hidden": "true"
 			}),
 			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("header", {
-				className: `mac-surface fixed inset-x-0 top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between gap-1 border-b pt-[env(safe-area-inset-top)] backdrop-blur-md transition-all duration-200 sm:gap-3 ${isElectron ? "mac-drag-region" : ""} ${isElectron && !isFullscreen ? "pl-20 pr-3 sm:pr-5" : "px-1.5 sm:px-5"} ${effectiveChromeVisible ? "translate-y-0 opacity-100" : "-translate-y-full pointer-events-none opacity-0"}`,
+				className: `mac-surface fixed inset-x-0 top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between gap-1 border-b pt-[env(safe-area-inset-top)] backdrop-blur-md transition-transform duration-200 will-change-transform sm:gap-3 ${isElectron ? "mac-drag-region" : ""} ${isElectron && !isFullscreen ? "pl-20 pr-3 sm:pr-5" : "px-1.5 sm:px-5"} ${effectiveChromeVisible ? "translate-y-0" : "-translate-y-full pointer-events-none"}`,
 				style: { backgroundColor: "color-mix(in srgb, var(--bg-surface) 88%, transparent)" },
 				children: [
 					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
@@ -44006,7 +44172,7 @@ function App() {
 								title: "Terjemahkan Bab Aktif (⌘T)",
 								"aria-label": "Terjemahkan Bab Aktif",
 								className: "flex min-h-[32px] shrink-0 items-center gap-1.5 rounded-xl bg-blue-600 px-2 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap sm:min-h-[36px] sm:px-3",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Sparkles, { className: "h-3.5 w-3.5" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								children: [readingMode !== "original" && (chapterPolishStatus === "drafting" || chapterPolishStatus === "polishing") ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white border-t-transparent" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Sparkles, { className: "h-3.5 w-3.5" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 									className: "hidden sm:inline",
 									children: "Terjemahkan"
 								})]
@@ -44164,7 +44330,9 @@ function App() {
 					toc,
 					onSelectTocHref: handleSelectTocHref,
 					bookmarks,
-					onSelectBookmark: (cfi) => renditionRef.current?.display(cfi),
+					onSelectBookmark: (cfi) => {
+						renditionRef.current?.display(cfi).catch(() => {});
+					},
 					onDeleteBookmark: (id) => {
 						const next = bookmarks.filter((b) => b.id !== id);
 						setBookmarks(next);
@@ -44185,7 +44353,7 @@ function App() {
 							if (readerFlowRef.current !== "scroll") return;
 							handleScrollMetric(e.currentTarget.scrollTop, outerScrollTrackerRef.current);
 						},
-						className: "fixed inset-0 z-0 flex flex-col items-center overflow-y-auto lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden",
+						className: "fixed inset-0 z-0 flex flex-col items-center overflow-y-auto overscroll-y-contain bg-[var(--bg-reader)] lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden",
 						children: [
 							loaderText && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 								className: "absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-app)]/90 backdrop-blur-xs",
@@ -44198,26 +44366,6 @@ function App() {
 								id: "epub-viewer",
 								ref: viewerRef,
 								className: `mac-reader-stage relative h-full w-full overflow-hidden transition-[max-width] duration-200 ${readerFlow === "paginated" ? CONTENT_WIDTH_CLASS[contentWidth] : "max-w-none"}`
-							}),
-							readingMode !== "original" && chapterPolishStatus !== "idle" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								"aria-live": "polite",
-								className: `fixed right-4 z-20 flex items-center gap-1.5 text-[11px] font-semibold transition-all duration-200 ${chapterPolishStatus === "draft-only" ? "pointer-events-auto" : "pointer-events-none"} ${effectiveChromeVisible ? "bottom-14 sm:bottom-14" : "bottom-3"} ${chapterPolishStatus === "polished" ? "text-emerald-600 dark:text-emerald-400" : chapterPolishStatus === "polishing" || chapterPolishStatus === "drafting" ? "text-blue-600 dark:text-blue-400" : "text-[var(--text-secondary)]"}`,
-								children: [
-									(chapterPolishStatus === "drafting" || chapterPolishStatus === "polishing") && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" }),
-									chapterPolishStatus === "drafting" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Draf Instan..." }),
-									chapterPolishStatus === "polishing" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Draf Instan · Memperhalus AI..." }),
-									chapterPolishStatus === "polished" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "AI Polished ✨" }),
-									chapterPolishStatus === "draft-only" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-										type: "button",
-										title: polishFallbackReason || "Draf Terjemahan Instan · Ketuk untuk Pengaturan AI",
-										onClick: () => {
-											if (polishFallbackReason) showToast(polishFallbackReason, "info");
-											else setApiSettingsOpen(true);
-										},
-										className: "rounded-md px-1.5 py-0.5 transition hover:bg-slate-500/10",
-										children: "Terjemahan Instan"
-									})
-								]
 							}),
 							popoverPos && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 								style: {
@@ -44277,15 +44425,34 @@ function App() {
 					})]
 				})]
 			}),
-			!effectiveChromeVisible && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 				onMouseEnter: () => setChromeVisible(true),
 				onClick: () => setChromeVisible(true),
-				className: "fixed inset-x-0 bottom-0 z-30 h-5 cursor-pointer",
+				className: `fixed inset-x-0 bottom-0 z-10 h-5 cursor-pointer ${effectiveChromeVisible ? "pointer-events-none" : "pointer-events-auto"}`,
 				"aria-hidden": "true"
 			}),
+			readingMode !== "original" && chapterPolishStatus !== "idle" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+				"aria-live": "polite",
+				className: `mac-surface fixed bottom-[max(0.6rem,env(safe-area-inset-bottom))] right-3 z-20 flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-semibold shadow-md sm:bottom-3 sm:right-4 ${chapterPolishStatus === "polished" ? "text-emerald-600 dark:text-emerald-400" : chapterPolishStatus === "polishing" || chapterPolishStatus === "drafting" ? "text-blue-600 dark:text-blue-400" : "text-[var(--text-secondary)]"}`,
+				children: [
+					(chapterPolishStatus === "drafting" || chapterPolishStatus === "polishing") && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" }),
+					chapterPolishStatus === "drafting" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Menyiapkan draf..." }),
+					chapterPolishStatus === "polishing" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Memperhalus AI..." }),
+					chapterPolishStatus === "polished" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "AI Polished ✨" }),
+					chapterPolishStatus === "draft-only" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+						type: "button",
+						title: polishFallbackReason || "Draf Terjemahan Instan · Ketuk untuk Pengaturan AI",
+						onClick: () => {
+							if (polishFallbackReason) showToast(polishFallbackReason, "info");
+							else setApiSettingsOpen(true);
+						},
+						className: "transition hover:underline",
+						children: "Terjemahan Instan"
+					})
+				]
+			}),
 			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("footer", {
-				className: `mac-surface fixed inset-x-0 bottom-0 z-30 border-t px-3 pb-[max(0.4rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-md transition-all duration-200 sm:px-5 sm:py-2 ${effectiveChromeVisible ? "translate-y-0 opacity-100" : "translate-y-full pointer-events-none opacity-0"}`,
-				style: { backgroundColor: "color-mix(in srgb, var(--bg-surface) 88%, transparent)" },
+				className: `mac-surface fixed inset-x-0 bottom-0 z-40 border-t bg-[var(--bg-surface)] px-3 pb-[max(0.4rem,env(safe-area-inset-bottom))] pt-1.5 transition-transform duration-200 will-change-transform sm:px-5 sm:py-2 ${effectiveChromeVisible ? "translate-y-0" : "translate-y-full pointer-events-none"}`,
 				children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 					className: "mx-auto flex max-w-4xl items-center gap-2.5 sm:gap-4",
 					children: [
@@ -44316,7 +44483,7 @@ function App() {
 										if (!bookRef.current || !locationsReady) return;
 										const pct = parseInt(e.target.value, 10) / 100;
 										const cfi = bookRef.current.locations.cfiFromPercentage(pct);
-										if (cfi) renditionRef.current?.display(cfi);
+										if (cfi) renditionRef.current?.display(cfi).catch(() => {});
 									},
 									"aria-label": "Progres Membaca",
 									className: "h-1.5 flex-1 cursor-pointer rounded-lg accent-blue-600"
