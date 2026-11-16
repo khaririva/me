@@ -83,7 +83,7 @@ export const SettingsPopover: React.FC<SettingsPopoverProps> = ({
 
   return (
     <div
-      className="mac-surface fixed right-3 top-14 z-40 max-h-[calc(100dvh-5rem)] w-[21rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-2xl border p-4 shadow-2xl sm:right-6 sm:top-16"
+      className="mac-surface fixed right-3 top-16 z-40 max-h-[calc(100dvh-5rem)] w-[21rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-2xl border p-4 shadow-2xl sm:right-6 sm:top-[4.25rem]"
       onClick={(e) => e.stopPropagation()}
     >
       <div className="flex items-center justify-between border-b border-[var(--border-color)] pb-2.5">

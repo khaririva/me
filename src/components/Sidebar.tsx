@@ -23,6 +23,8 @@ interface SidebarProps {
   onDeleteVocab: (id: string) => void;
   onOpenShortcuts: () => void;
   isElectron?: boolean;
+  isFullscreen?: boolean;
+  headerVisible?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -46,6 +48,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onDeleteVocab,
   onOpenShortcuts,
   isElectron,
+  isFullscreen = false,
+  headerVisible = true,
 }) => {
   const currentBookBookmarks = bookmarks.filter((b) => b.bookId === currentBookId);
 
@@ -80,15 +84,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       <aside
-        className={`mac-sidebar fixed inset-y-0 left-0 z-40 flex w-[18.5rem] max-w-[85vw] shrink-0 flex-col border-r backdrop-blur-xl transition-transform duration-200 lg:static lg:pt-0 ${
-          isElectron ? 'pt-8' : ''
+        className={`mac-sidebar fixed inset-y-0 left-0 z-50 flex w-[18.5rem] max-w-[85vw] shrink-0 flex-col border-r backdrop-blur-xl transition-transform duration-200 lg:static lg:z-30 ${
+          isElectron && !isFullscreen ? 'pt-9' : ''
+        } ${
+          headerVisible
+            ? 'lg:pt-14'
+            : isElectron && !isFullscreen
+            ? 'lg:pt-9'
+            : 'lg:pt-0'
         } ${
           openMobile ? 'translate-x-0' : '-translate-x-full'
         } ${openDesktop ? 'lg:flex lg:translate-x-0' : 'lg:hidden'}`}
       >
         {/* Tab Switcher */}
-        <div className="flex items-center justify-between gap-1.5 border-b border-[var(--border-color)] p-3">
-          <div className="grid w-full grid-cols-4 gap-0.5 rounded-xl bg-slate-500/10 p-1 text-[11px] font-semibold">
+        <div className="flex items-center justify-between gap-1.5 border-b border-[var(--border-color)] p-2.5">
+          <div className="grid w-full min-w-0 grid-cols-4 gap-1 rounded-xl bg-slate-500/10 p-1 text-[11px] font-semibold">
             {(
               [
                 { id: 'library', label: 'Buku' },
@@ -101,7 +111,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 key={tab.id}
                 type="button"
                 onClick={() => onChangeTab(tab.id)}
-                className={`rounded-lg px-1.5 py-1.5 text-center whitespace-nowrap transition ${
+                className={`min-w-0 truncate rounded-lg px-1 py-1.5 text-center leading-tight whitespace-nowrap transition ${
                   activeTab === tab.id
                     ? 'bg-blue-600 text-white shadow-xs'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -115,7 +125,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             type="button"
             onClick={onCloseMobile}
             aria-label="Tutup Sidebar"
-            className="rounded-lg p-1.5 hover:bg-slate-500/10 lg:hidden"
+            className="shrink-0 rounded-lg p-1.5 hover:bg-slate-500/10 lg:hidden"
           >
             <X className="h-4 w-4" />
           </button>
@@ -155,13 +165,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </button>
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   {libraryBooks.map((book) => {
                     const isActive = book.id === currentBookId;
                     return (
                       <div
                         key={book.id}
-                        className={`mac-surface group flex items-start justify-between gap-2 rounded-xl border p-3 transition ${
+                        className={`mac-surface group flex items-start justify-between gap-2 rounded-xl border p-2.5 transition ${
                           isActive
                             ? 'border-blue-500/70 ring-1 ring-blue-500/30'
                             : 'hover:border-blue-500/40'

@@ -299,9 +299,12 @@ export default function App() {
   // Toasts
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Platform Runtime & Online Status
+  // Platform Runtime, Fullscreen & Online Status
   const { isElectron } = usePWAInstall();
   const isOnline = useOnlineStatus();
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
+    typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : false
+  );
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 640 : false
   );
@@ -328,6 +331,7 @@ export default function App() {
   const scrollLastTopRef = useRef<number>(0);
   const scrollContainerBoundRef = useRef<HTMLElement | null>(null);
   const isAnyModalOpenRef = useRef<boolean>(false);
+  const handleEscapeRef = useRef<() => void>(() => {});
   const batchControlRef = useRef<{ running: boolean; paused: boolean; cancelled: boolean }>({
     running: false,
     paused: false,
@@ -375,6 +379,41 @@ export default function App() {
       hasServerEnvKeyRef.current = health.hasDefaultEnvKey;
       setHasServerEnvKey(health.hasDefaultEnvKey);
     });
+  }, []);
+
+  useEffect(() => {
+    const macDesktop = (
+      window as unknown as {
+        macDesktop?: {
+          isFullScreen?: () => Promise<boolean>;
+          onFullScreenChanged?: (cb: (val: boolean) => void) => () => void;
+        };
+      }
+    ).macDesktop;
+
+    const syncBrowserFullscreen = () => {
+      if (document.fullscreenElement) {
+        setIsFullscreen(true);
+      } else {
+        void macDesktop?.isFullScreen?.().then((fs) => setIsFullscreen(Boolean(fs))).catch(() => {
+          setIsFullscreen(false);
+        });
+        if (!macDesktop?.isFullScreen) {
+          setIsFullscreen(false);
+        }
+      }
+    };
+
+    syncBrowserFullscreen();
+    document.addEventListener('fullscreenchange', syncBrowserFullscreen);
+    const unsubMacFs = macDesktop?.onFullScreenChanged?.((fs) => {
+      setIsFullscreen(Boolean(fs) || Boolean(document.fullscreenElement));
+    });
+
+    return () => {
+      document.removeEventListener('fullscreenchange', syncBrowserFullscreen);
+      unsubMacFs?.();
+    };
   }, []);
 
   const showToast = useCallback((text: string, type: ToastMessage['type'] = 'info') => {
@@ -471,7 +510,7 @@ export default function App() {
               padding: `${isMobileViewport ? '64px 18px 80px' : '72px 36px 88px'} !important`,
             }
           : {
-              padding: `${isMobileViewport ? '54px 18px 60px' : '58px 36px 64px'} !important`,
+              padding: `${isMobileViewport ? '62px 18px 64px' : '66px 36px 68px'} !important`,
             }),
       },
       'p, li, blockquote': {
@@ -1284,6 +1323,10 @@ export default function App() {
           syncScrollNavFooterInDoc(doc, contents.section?.href);
 
           doc.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+              handleEscapeRef.current();
+              return;
+            }
             const target = e.target as HTMLElement | null;
             const isTyping =
               target &&
@@ -1626,6 +1669,39 @@ export default function App() {
     [loadEpubBook, showToast]
   );
 
+  const handleEscapeKey = useCallback(() => {
+    const hasOpenOverlay = Boolean(
+      settingsOpen ||
+        apiSettingsOpen ||
+        shortcutsOpen ||
+        bookListOpen ||
+        popoverPos !== null ||
+        drawerOpen ||
+        sidebarMobileOpen
+    );
+
+    if (hasOpenOverlay) {
+      setSettingsOpen(false);
+      setApiSettingsOpen(false);
+      setShortcutsOpen(false);
+      setBookListOpen(false);
+      setPopoverPos(null);
+      setDrawerOpen(false);
+      setSidebarMobileOpen(false);
+      setChromeVisible(true);
+      return;
+    }
+
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    }
+    setChromeVisible(true);
+  }, [apiSettingsOpen, bookListOpen, drawerOpen, popoverPos, settingsOpen, shortcutsOpen, sidebarMobileOpen]);
+
+  useEffect(() => {
+    handleEscapeRef.current = handleEscapeKey;
+  }, [handleEscapeKey]);
+
   // MacBook / Desktop Keyboard Shortcuts & Arrow Navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1670,12 +1746,7 @@ export default function App() {
         return;
       }
       if (e.key === 'Escape') {
-        setSettingsOpen(false);
-        setApiSettingsOpen(false);
-        setShortcutsOpen(false);
-        setBookListOpen(false);
-        setPopoverPos(null);
-        setChromeVisible(true);
+        handleEscapeKey();
         return;
       }
 
@@ -1702,6 +1773,7 @@ export default function App() {
     apiSettingsOpen,
     bookListOpen,
     handleAddBookmark,
+    handleEscapeKey,
     handleTranslateCurrentPage,
     navigateReader,
     scrollReaderVertical,
@@ -2063,8 +2135,10 @@ export default function App() {
 
       {/* Floating Minimalist Auto-Hide Top Bar */}
       <header
-        className={`mac-surface fixed inset-x-0 top-0 z-30 flex h-12 items-center justify-between gap-2 border-b backdrop-blur-md transition-all duration-200 sm:gap-3 ${
-          isElectron ? 'mac-drag-region pl-20 pr-4' : 'px-2.5 sm:px-5'
+        className={`mac-surface fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between gap-1 border-b backdrop-blur-md transition-all duration-200 sm:gap-3 ${
+          isElectron ? 'mac-drag-region' : ''
+        } ${
+          isElectron && !isFullscreen ? 'pl-20 pr-3 sm:pr-5' : 'px-2 sm:px-5'
         } ${
           effectiveChromeVisible
             ? 'translate-y-0 opacity-100'
@@ -2073,7 +2147,7 @@ export default function App() {
         style={{ backgroundColor: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)' }}
       >
         {/* Left: Sidebar, Book List, Book & Chapter Title */}
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1 sm:gap-2">
           <button
             type="button"
             onClick={() => {
@@ -2085,7 +2159,7 @@ export default function App() {
             }}
             title="Daftar Isi & Pustaka (⌘\)"
             aria-label="Daftar Isi & Pustaka"
-            className="mac-no-drag flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 shrink-0 sm:min-h-[36px] sm:min-w-[36px]"
+            className="mac-no-drag flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10"
           >
             <PanelLeft className="h-4 w-4" />
           </button>
@@ -2094,10 +2168,10 @@ export default function App() {
             type="button"
             onClick={() => setBookListOpen(true)}
             title="Book List (⌘L)"
-            className="mac-no-drag flex min-h-[40px] items-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap shrink-0 sm:min-h-[36px]"
+            className="mac-no-drag flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-xl px-1.5 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap sm:px-2"
           >
             <Library className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-            <span className="hidden sm:inline">Book List</span>
+            <span className="hidden lg:inline">Book List</span>
           </button>
 
           <div className="hidden h-4 w-px bg-[var(--border-color)] sm:block" />
@@ -2113,7 +2187,7 @@ export default function App() {
         </div>
 
         {/* Center: Clean Reading Mode Switch */}
-        <div className="mac-no-drag hidden items-center rounded-xl border border-[var(--border-color)] bg-slate-500/5 p-0.5 text-xs font-semibold md:flex shrink-0">
+        <div className="mac-no-drag flex shrink-0 items-center rounded-xl border border-[var(--border-color)] bg-slate-500/5 p-0.5 text-[11px] font-semibold sm:text-xs">
           {(
             [
               { id: 'original', label: 'Asli' },
@@ -2125,7 +2199,7 @@ export default function App() {
               key={mode.id}
               type="button"
               onClick={() => handleChangeReadingMode(mode.id)}
-              className={`rounded-lg px-2.5 py-1 whitespace-nowrap transition ${
+              className={`rounded-lg px-1.5 py-1 whitespace-nowrap transition sm:px-2.5 ${
                 readingMode === mode.id
                   ? 'bg-blue-600 text-white shadow-xs'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -2142,10 +2216,11 @@ export default function App() {
             type="button"
             onClick={handleTranslateCurrentPage}
             title="Terjemahkan Bab Aktif (⌘T)"
-            className="hidden items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap shrink-0 sm:flex"
+            aria-label="Terjemahkan Bab Aktif"
+            className="flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-xl bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap sm:px-3"
           >
             <Sparkles className="h-3.5 w-3.5" />
-            <span>Terjemahkan</span>
+            <span className="hidden sm:inline">Terjemahkan</span>
           </button>
 
           <button
@@ -2153,7 +2228,7 @@ export default function App() {
             onClick={handleAddBookmark}
             title="Tandai Halaman Ini (⌘D)"
             aria-label="Tandai Halaman Ini"
-            className="hidden min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:inline-flex"
+            className="hidden min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:inline-flex"
           >
             <Bookmark className="h-4 w-4" />
           </button>
@@ -2164,9 +2239,9 @@ export default function App() {
               e.stopPropagation();
               setSettingsOpen((v) => !v);
             }}
-            title="Tipografi & Mode Baca"
+            title="Tipografi & Mode Baca (Aa)"
             aria-label="Tipografi & Mode Baca"
-            className={`flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px] ${
+            className={`flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 ${
               settingsOpen ? 'bg-blue-600/12 text-blue-600 dark:text-blue-400' : ''
             }`}
           >
@@ -2182,7 +2257,7 @@ export default function App() {
             }}
             title="Pengaturan Gemini API & Model AI"
             aria-label="Pengaturan Gemini API & Model AI"
-            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px]"
+            className="flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10"
           >
             <Settings className="h-4 w-4" />
           </button>
@@ -2192,7 +2267,7 @@ export default function App() {
             onClick={() => fileInputRef.current?.click()}
             title="Unggah File EPUB (⌘O)"
             aria-label="Unggah File EPUB"
-            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 text-blue-600 transition hover:bg-blue-500/10 dark:text-blue-400 sm:min-h-[36px] sm:min-w-[36px]"
+            className="flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-blue-600 transition hover:bg-blue-500/10 dark:text-blue-400"
           >
             <Upload className="h-4 w-4" />
           </button>
@@ -2201,7 +2276,7 @@ export default function App() {
 
       {/* Full-Book Batch Translation Progress Bar */}
       {showBatchBar && (
-        <div className="mac-surface fixed inset-x-0 top-12 z-20 border-b px-4 py-2.5 shadow-md">
+        <div className="mac-surface fixed inset-x-0 top-14 z-30 border-b px-4 py-2.5 shadow-md">
           <div className="mx-auto flex max-w-5xl flex-col justify-between gap-2.5 sm:flex-row sm:items-center">
             <div className="min-w-0 flex-1 space-y-1.5">
               <div className="flex items-center justify-between gap-2 text-xs">
@@ -2323,6 +2398,8 @@ export default function App() {
             showToast('Buku dihapus dari PustakaLoka.', 'info');
           }}
           isElectron={isElectron}
+          isFullscreen={isFullscreen}
+          headerVisible={effectiveChromeVisible}
           onTriggerUpload={() => fileInputRef.current?.click()}
           onLoadSampleBook={async () => {
             const sampleBuffer = await createSampleEpubBuffer();
@@ -2532,15 +2609,6 @@ export default function App() {
               {pageLocationLabel}
             </span>
           </div>
-
-          <button
-            type="button"
-            onClick={handleTranslateCurrentPage}
-            aria-label="Terjemahkan Bab"
-            className="flex min-h-[40px] items-center justify-center gap-1 rounded-xl bg-blue-600 px-2.5 text-xs font-semibold text-white transition active:scale-95 sm:hidden"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-          </button>
 
           <button
             type="button"

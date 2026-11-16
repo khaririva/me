@@ -95,7 +95,7 @@ export const BookListModal: React.FC<BookListModalProps> = ({
         </div>
 
         {/* List */}
-        <div className="flex-1 space-y-2 overflow-y-auto p-5">
+        <div className="flex-1 space-y-1.5 overflow-y-auto p-5">
           {filteredBooks.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[var(--border-color)] p-8 text-center">
               <AppLogo className="mx-auto mb-3 h-12 w-12 rounded-2xl shadow-sm" />

@@ -395,13 +395,27 @@ async function createWindow() {
     title: 'PustakaLoka — Pembaca EPUB & Terjemahan AI',
     ...(resolvedIconPath ? { icon: resolvedIconPath } : {}),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    trafficLightPosition: { x: 14, y: 10 },
+    trafficLightPosition: { x: 16, y: 20 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  mainWindow.webContents.on('before-input-event', (_event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape' && mainWindow && mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false);
+    }
+  });
+
+  const notifyFullscreenState = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:fullscreen-changed', mainWindow.isFullScreen());
+    }
+  };
+  mainWindow.on('enter-full-screen', notifyFullscreenState);
+  mainWindow.on('leave-full-screen', notifyFullscreenState);
 
   await mainWindow.loadURL(targetUrl);
 
@@ -411,6 +425,7 @@ async function createWindow() {
 }
 
 ipcMain.handle('mac:open-epub-dialog', () => openEpubDialog());
+ipcMain.handle('mac:is-fullscreen', () => (mainWindow ? mainWindow.isFullScreen() : false));
 
 app.whenReady().then(async () => {
   createMacMenu();
