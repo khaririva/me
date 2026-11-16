@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Download,
   Languages,
-  Library,
   PanelLeft,
   Pause,
   Play,
@@ -19,7 +18,6 @@ import {
   X,
 } from 'lucide-react';
 import { ApiSettingsModal } from './components/ApiSettingsModal';
-import { BookListModal } from './components/BookListModal';
 import { SettingsPopover } from './components/SettingsPopover';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { Sidebar } from './components/Sidebar';
@@ -75,6 +73,8 @@ interface RenditionContentsItem {
 
 interface SpineSection {
   href: string;
+  index?: number;
+  canonical?: string;
   load: (loader: unknown) => Promise<Document>;
 }
 
@@ -107,12 +107,14 @@ function normalizeBlockText(text: string): string {
 
 function normalizeHref(href?: string | null): string {
   if (!href) return '';
-  const raw = href.split('#')[0];
+  const withoutHash = href.split('#')[0].split('?')[0].replace(/\\/g, '/').trim();
+  let decoded = withoutHash;
   try {
-    return decodeURIComponent(raw).replace(/^\/+/, '').replace(/^\.\//, '');
+    decoded = decodeURIComponent(withoutHash);
   } catch {
-    return raw.replace(/^\/+/, '').replace(/^\.\//, '');
+    decoded = withoutHash;
   }
+  return decoded.replace(/^(\.\.?\/|\/)+/, '');
 }
 
 function hrefMatches(a?: string | null, b?: string | null): boolean {
@@ -120,10 +122,52 @@ function hrefMatches(a?: string | null, b?: string | null): boolean {
   const nb = normalizeHref(b);
   if (!na || !nb) return false;
   if (na === nb) return true;
-  if (na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`)) return true;
-  const baseA = na.split('/').pop() || '';
-  const baseB = nb.split('/').pop() || '';
+  if (na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`) || na.endsWith(nb) || nb.endsWith(na)) {
+    return true;
+  }
+  const baseA = (na.split('/').pop() || '').toLowerCase();
+  const baseB = (nb.split('/').pop() || '').toLowerCase();
   return Boolean(baseA && baseB && baseA === baseB);
+}
+
+function findSpineSectionByHref(
+  spineItems: SpineSection[],
+  targetHref?: string | null
+): SpineSection | undefined {
+  const cleanTarget = normalizeHref(targetHref);
+  if (!cleanTarget || spineItems.length === 0) return undefined;
+
+  const exactMatch = spineItems.find((s) => normalizeHref(s.href) === cleanTarget);
+  if (exactMatch) return exactMatch;
+
+  const endsWithMatch = spineItems.find((s) => {
+    const cleanSpine = normalizeHref(s.href);
+    return (
+      cleanSpine.endsWith(`/${cleanTarget}`) ||
+      cleanTarget.endsWith(`/${cleanSpine}`) ||
+      cleanSpine.endsWith(cleanTarget) ||
+      cleanTarget.endsWith(cleanSpine)
+    );
+  });
+  if (endsWithMatch) return endsWithMatch;
+
+  const targetBase = (cleanTarget.split('/').pop() || '').toLowerCase();
+  if (!targetBase) return undefined;
+  return spineItems.find((s) => {
+    const spineBase = (normalizeHref(s.href).split('/').pop() || '').toLowerCase();
+    return Boolean(spineBase && spineBase === targetBase);
+  });
+}
+
+function findTocNodeByHref(items: TocNode[], targetHref?: string | null): TocNode | undefined {
+  for (const item of items) {
+    if (hrefMatches(item.href, targetHref)) return item;
+    if (item.subitems && item.subitems.length > 0) {
+      const nested = findTocNodeByHref(item.subitems, targetHref);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 function getTranslatableBlocks(doc: Document): HTMLElement[] {
@@ -241,7 +285,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
   const [hasServerEnvKey, setHasServerEnvKey] = useState(false);
-  const [bookListOpen, setBookListOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
 
@@ -340,15 +383,14 @@ export default function App() {
 
   useEffect(() => {
     isAnyModalOpenRef.current = Boolean(
-      apiSettingsOpen || bookListOpen || shortcutsOpen || settingsOpen
+      apiSettingsOpen || shortcutsOpen || settingsOpen
     );
-  }, [apiSettingsOpen, bookListOpen, settingsOpen, shortcutsOpen]);
+  }, [apiSettingsOpen, settingsOpen, shortcutsOpen]);
 
   const effectiveChromeVisible =
     chromeVisible ||
     settingsOpen ||
     apiSettingsOpen ||
-    bookListOpen ||
     shortcutsOpen ||
     drawerOpen ||
     showBatchBar ||
@@ -1259,7 +1301,7 @@ export default function App() {
               );
             }
 
-            const foundToc = tocList.find((item) => hrefMatches(item.href, location.start?.href));
+            const foundToc = findTocNodeByHref(tocList, location.start?.href);
             if (foundToc) {
               const title = foundToc.label.trim();
               currentChapterTitleRef.current = title;
@@ -1674,7 +1716,6 @@ export default function App() {
       settingsOpen ||
         apiSettingsOpen ||
         shortcutsOpen ||
-        bookListOpen ||
         popoverPos !== null ||
         drawerOpen ||
         sidebarMobileOpen
@@ -1684,7 +1725,6 @@ export default function App() {
       setSettingsOpen(false);
       setApiSettingsOpen(false);
       setShortcutsOpen(false);
-      setBookListOpen(false);
       setPopoverPos(null);
       setDrawerOpen(false);
       setSidebarMobileOpen(false);
@@ -1696,11 +1736,71 @@ export default function App() {
       void document.exitFullscreen().catch(() => {});
     }
     setChromeVisible(true);
-  }, [apiSettingsOpen, bookListOpen, drawerOpen, popoverPos, settingsOpen, shortcutsOpen, sidebarMobileOpen]);
+  }, [apiSettingsOpen, drawerOpen, popoverPos, settingsOpen, shortcutsOpen, sidebarMobileOpen]);
 
   useEffect(() => {
     handleEscapeRef.current = handleEscapeKey;
   }, [handleEscapeKey]);
+
+  const handleSelectTocHref = useCallback(async (rawHref: string, label?: string) => {
+    const rendition = renditionRef.current;
+    const book = bookRef.current;
+    if (!rendition || !book) return;
+
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setSidebarMobileOpen(false);
+    }
+
+    const cleanHref = normalizeHref(rawHref);
+    const spineItems = ((book.spine as unknown as { spineItems?: SpineSection[] })?.spineItems ||
+      []) as SpineSection[];
+    const matchedSection = findSpineSectionByHref(spineItems, rawHref);
+
+    if (label && label.trim()) {
+      const trimmed = label.trim();
+      currentChapterTitleRef.current = trimmed;
+      setCurrentChapterTitle(trimmed);
+    }
+
+    const displayTarget =
+      matchedSection && typeof matchedSection.index === 'number'
+        ? matchedSection.index
+        : matchedSection?.href || cleanHref || rawHref;
+
+    try {
+      await rendition.display(displayTarget as string);
+    } catch {
+      if (cleanHref && cleanHref !== displayTarget) {
+        try {
+          await rendition.display(cleanHref);
+        } catch {
+          // ignore unresolvable href fallback
+        }
+      }
+    }
+
+    const resetScrollTop = () => {
+      const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+      if (container) {
+        container.scrollTop = 0;
+        container.scrollTo({ top: 0, behavior: 'auto' });
+      }
+      const contentsList = (renditionRef.current?.getContents() ||
+        []) as unknown as RenditionContentsItem[];
+      contentsList.forEach((c) => {
+        try {
+          c.window?.scrollTo?.(0, 0);
+          if (c.document?.documentElement) c.document.documentElement.scrollTop = 0;
+          if (c.document?.body) c.document.body.scrollTop = 0;
+        } catch {
+          // ignore iframe scroll reset errors
+        }
+      });
+    };
+
+    resetScrollTop();
+    setTimeout(resetScrollTop, 80);
+  }, []);
 
   // MacBook / Desktop Keyboard Shortcuts & Arrow Navigation
   useEffect(() => {
@@ -1710,11 +1810,6 @@ export default function App() {
         target &&
         (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable);
 
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l') {
-        e.preventDefault();
-        setBookListOpen((v) => !v);
-        return;
-      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
         e.preventDefault();
         fileInputRef.current?.click();
@@ -1750,7 +1845,7 @@ export default function App() {
         return;
       }
 
-      if (isInput || apiSettingsOpen || bookListOpen || shortcutsOpen || settingsOpen) return;
+      if (isInput || apiSettingsOpen || shortcutsOpen || settingsOpen) return;
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
@@ -1771,7 +1866,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     apiSettingsOpen,
-    bookListOpen,
     handleAddBookmark,
     handleEscapeKey,
     handleTranslateCurrentPage,
@@ -2135,10 +2229,10 @@ export default function App() {
 
       {/* Floating Minimalist Auto-Hide Top Bar */}
       <header
-        className={`mac-surface fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between gap-1 border-b backdrop-blur-md transition-all duration-200 sm:gap-3 ${
+        className={`mac-surface fixed inset-x-0 top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between gap-1 border-b pt-[env(safe-area-inset-top)] backdrop-blur-md transition-all duration-200 sm:gap-3 ${
           isElectron ? 'mac-drag-region' : ''
         } ${
-          isElectron && !isFullscreen ? 'pl-20 pr-3 sm:pr-5' : 'px-2 sm:px-5'
+          isElectron && !isFullscreen ? 'pl-20 pr-3 sm:pr-5' : 'px-1.5 sm:px-5'
         } ${
           effectiveChromeVisible
             ? 'translate-y-0 opacity-100'
@@ -2146,8 +2240,8 @@ export default function App() {
         }`}
         style={{ backgroundColor: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)' }}
       >
-        {/* Left: Sidebar, Book List, Book & Chapter Title */}
-        <div className="flex min-w-0 flex-1 items-center gap-1 sm:gap-2">
+        {/* Left: Sidebar Toggle & Book Title (hidden on mobile <640px) */}
+        <div className="flex shrink-0 items-center gap-1 sm:min-w-0 sm:flex-1 sm:gap-2">
           <button
             type="button"
             onClick={() => {
@@ -2159,35 +2253,25 @@ export default function App() {
             }}
             title="Daftar Isi & Pustaka (⌘\)"
             aria-label="Daftar Isi & Pustaka"
-            className="mac-no-drag flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10"
+            className="mac-no-drag flex min-h-[32px] min-w-[32px] shrink-0 items-center justify-center rounded-xl p-1.5 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px] sm:p-2"
           >
             <PanelLeft className="h-4 w-4" />
           </button>
 
-          <button
-            type="button"
-            onClick={() => setBookListOpen(true)}
-            title="Book List (⌘L)"
-            className="mac-no-drag flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-xl px-1.5 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap sm:px-2"
-          >
-            <Library className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-            <span className="hidden lg:inline">Book List</span>
-          </button>
-
           <div className="hidden h-4 w-px bg-[var(--border-color)] sm:block" />
 
-          <div className="min-w-0">
-            <h1 className="truncate text-xs font-bold leading-tight sm:text-sm">
+          <div className="hidden min-w-0 sm:block">
+            <h1 className="truncate text-sm font-bold leading-tight">
               {currentBookTitle}
             </h1>
-            <p className="hidden truncate text-[11px] text-[var(--text-secondary)] sm:block">
+            <p className="truncate text-[11px] text-[var(--text-secondary)]">
               {currentChapterTitle}
             </p>
           </div>
         </div>
 
         {/* Center: Clean Reading Mode Switch */}
-        <div className="mac-no-drag flex shrink-0 items-center rounded-xl border border-[var(--border-color)] bg-slate-500/5 p-0.5 text-[11px] font-semibold sm:text-xs">
+        <div className="mac-no-drag flex shrink-0 items-center rounded-xl border border-[var(--border-color)] bg-slate-500/5 p-0.5 font-semibold">
           {(
             [
               { id: 'original', label: 'Asli' },
@@ -2199,7 +2283,7 @@ export default function App() {
               key={mode.id}
               type="button"
               onClick={() => handleChangeReadingMode(mode.id)}
-              className={`rounded-lg px-1.5 py-1 whitespace-nowrap transition sm:px-2.5 ${
+              className={`shrink-0 rounded-lg px-2 py-1 text-xs whitespace-nowrap transition sm:px-2.5 ${
                 readingMode === mode.id
                   ? 'bg-blue-600 text-white shadow-xs'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -2217,7 +2301,7 @@ export default function App() {
             onClick={handleTranslateCurrentPage}
             title="Terjemahkan Bab Aktif (⌘T)"
             aria-label="Terjemahkan Bab Aktif"
-            className="flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-xl bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap sm:px-3"
+            className="flex min-h-[32px] shrink-0 items-center gap-1.5 rounded-xl bg-blue-600 px-2 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap sm:min-h-[36px] sm:px-3"
           >
             <Sparkles className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Terjemahkan</span>
@@ -2241,7 +2325,7 @@ export default function App() {
             }}
             title="Tipografi & Mode Baca (Aa)"
             aria-label="Tipografi & Mode Baca"
-            className={`flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 ${
+            className={`flex min-h-[32px] min-w-[32px] shrink-0 items-center justify-center rounded-xl p-1.5 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px] sm:p-2 ${
               settingsOpen ? 'bg-blue-600/12 text-blue-600 dark:text-blue-400' : ''
             }`}
           >
@@ -2257,26 +2341,16 @@ export default function App() {
             }}
             title="Pengaturan Gemini API & Model AI"
             aria-label="Pengaturan Gemini API & Model AI"
-            className="flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10"
+            className="flex min-h-[32px] min-w-[32px] shrink-0 items-center justify-center rounded-xl p-1.5 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px] sm:p-2"
           >
             <Settings className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            title="Unggah File EPUB (⌘O)"
-            aria-label="Unggah File EPUB"
-            className="flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-blue-600 transition hover:bg-blue-500/10 dark:text-blue-400"
-          >
-            <Upload className="h-4 w-4" />
           </button>
         </div>
       </header>
 
       {/* Full-Book Batch Translation Progress Bar */}
       {showBatchBar && (
-        <div className="mac-surface fixed inset-x-0 top-14 z-30 border-b px-4 py-2.5 shadow-md">
+        <div className="mac-surface fixed inset-x-0 top-[calc(3.5rem+env(safe-area-inset-top))] z-30 border-b px-4 py-2.5 shadow-md">
           <div className="mx-auto flex max-w-5xl flex-col justify-between gap-2.5 sm:flex-row sm:items-center">
             <div className="min-w-0 flex-1 space-y-1.5">
               <div className="flex items-center justify-between gap-2 text-xs">
@@ -2413,7 +2487,7 @@ export default function App() {
             showToast('Buku contoh bawaan dimuat.', 'info');
           }}
           toc={toc}
-          onSelectTocHref={(href) => renditionRef.current?.display(href)}
+          onSelectTocHref={handleSelectTocHref}
           bookmarks={bookmarks}
           onSelectBookmark={(cfi) => renditionRef.current?.display(cfi)}
           onDeleteBookmark={(id) => {
@@ -2626,42 +2700,6 @@ export default function App() {
       </footer>
 
       {/* Modals */}
-      <BookListModal
-        open={bookListOpen}
-        onClose={() => setBookListOpen(false)}
-        books={libraryBooks}
-        currentBookId={currentBookId}
-        onSelectBook={async (bookId) => {
-          const rec = await LibraryDB.getBook(bookId);
-          if (rec) {
-            await loadEpubBook(rec.data, {
-              bookId: rec.id,
-              title: rec.title,
-              author: rec.author,
-              isSample: rec.isSample,
-              persist: true,
-            });
-          }
-        }}
-        onDeleteBook={async (bookId) => {
-          await LibraryDB.deleteBook(bookId);
-          await refreshLibraryList();
-          showToast('Buku dihapus dari Book List.', 'info');
-        }}
-        onTriggerUpload={() => fileInputRef.current?.click()}
-        onLoadSampleBook={async () => {
-          const sampleBuffer = await createSampleEpubBuffer();
-          await loadEpubBook(sampleBuffer, {
-            bookId: SAMPLE_BOOK_ID,
-            title: 'The Art of Quiet Reading (Buku Contoh)',
-            author: 'Eleanor Vance',
-            isSample: true,
-            persist: true,
-          });
-          showToast('Buku contoh bawaan dimuat.', 'info');
-        }}
-      />
-
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
       <ApiSettingsModal

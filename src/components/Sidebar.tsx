@@ -15,7 +15,7 @@ interface SidebarProps {
   onTriggerUpload: () => void;
   onLoadSampleBook: () => void;
   toc: TocNode[];
-  onSelectTocHref: (href: string) => void;
+  onSelectTocHref: (href: string, label?: string) => void;
   bookmarks: BookmarkItem[];
   onSelectBookmark: (cfi: string) => void;
   onDeleteBookmark: (id: string) => void;
@@ -60,7 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={() => {
-              onSelectTocHref(item.href);
+              onSelectTocHref(item.href, item.label);
               onCloseMobile();
             }}
             style={{ paddingLeft: `${12 + depth * 14}px` }}
@@ -85,7 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       <aside
         className={`mac-sidebar fixed inset-y-0 left-0 z-50 flex w-[18.5rem] max-w-[85vw] shrink-0 flex-col border-r backdrop-blur-xl transition-transform duration-200 lg:static lg:z-30 ${
-          isElectron && !isFullscreen ? 'pt-9' : ''
+          isElectron && !isFullscreen ? 'pt-9' : 'pt-[env(safe-area-inset-top)]'
         } ${
           headerVisible
             ? 'lg:pt-14'
@@ -137,7 +137,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="space-y-3">
               <div className="flex items-center justify-between px-1">
                 <span className="text-xs font-semibold text-[var(--text-secondary)] tabular-nums">
-                  Book List ({libraryBooks.length})
+                  Pustaka Buku ({libraryBooks.length})
                 </span>
                 <button
                   type="button"

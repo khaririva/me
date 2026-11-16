@@ -9,7 +9,6 @@ interface ShortcutsModalProps {
 const SHORTCUTS = [
   { keys: '← / →', label: 'Pindah halaman (Mode Halaman) atau pindah bab (Mode Scroll)' },
   { keys: '↑ / ↓', label: 'Gulir bacaan ke atas atau ke bawah dengan mulus (Mode Scroll)' },
-  { keys: '⌘ L', label: 'Buka menu Book List' },
   { keys: '⌘ O', label: 'Buka file EPUB dari perangkat' },
   { keys: '⌘ \\', label: 'Tampilkan atau sembunyikan sidebar daftar isi' },
   { keys: '⌘ T', label: 'Terjemahkan bab aktif (Hybrid Translate)' },
