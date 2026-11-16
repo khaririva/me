@@ -22,6 +22,7 @@ interface SidebarProps {
   vocabList: VocabItem[];
   onDeleteVocab: (id: string) => void;
   onOpenShortcuts: () => void;
+  isElectron?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -44,6 +45,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   vocabList,
   onDeleteVocab,
   onOpenShortcuts,
+  isElectron,
 }) => {
   const currentBookBookmarks = bookmarks.filter((b) => b.bookId === currentBookId);
 
@@ -78,7 +80,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       <aside
-        className={`mac-sidebar fixed inset-y-0 left-0 z-40 flex w-[18.5rem] max-w-[85vw] shrink-0 flex-col border-r backdrop-blur-xl transition-transform duration-200 lg:static ${
+        className={`mac-sidebar fixed inset-y-0 left-0 z-40 flex w-[18.5rem] max-w-[85vw] shrink-0 flex-col border-r backdrop-blur-xl transition-transform duration-200 lg:static lg:pt-0 ${
+          isElectron ? 'pt-8' : ''
+        } ${
           openMobile ? 'translate-x-0' : '-translate-x-full'
         } ${openDesktop ? 'lg:flex lg:translate-x-0' : 'lg:hidden'}`}
       >
@@ -87,7 +91,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="grid w-full grid-cols-4 gap-0.5 rounded-xl bg-slate-500/10 p-1 text-[11px] font-semibold">
             {(
               [
-                { id: 'library', label: 'Pustaka' },
+                { id: 'library', label: 'Buku' },
                 { id: 'toc', label: 'Bab' },
                 { id: 'bookmarks', label: 'Penanda' },
                 { id: 'vocab', label: 'Kamus' },
@@ -122,8 +126,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {activeTab === 'library' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between px-1">
-                <span className="text-xs font-semibold text-[var(--text-secondary)]">
-                  Pustaka MacBook ({libraryBooks.length})
+                <span className="text-xs font-semibold text-[var(--text-secondary)] tabular-nums">
+                  Book List ({libraryBooks.length})
                 </span>
                 <button
                   type="button"
@@ -136,8 +140,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
 
               {libraryBooks.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]">
-                  Belum ada file EPUB tersimpan. Seret file .epub ke jendela atau klik Tambah.
+                <div className="space-y-3 rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]">
+                  <p>Belum ada file EPUB tersimpan. Seret file .epub ke jendela atau klik Tambah.</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onLoadSampleBook();
+                      onCloseMobile();
+                    }}
+                    className="mac-surface inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold text-[var(--text-primary)] transition hover:bg-slate-500/10"
+                  >
+                    <BookMarked className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                    Muat Buku Contoh
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -195,7 +210,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {activeTab === 'toc' && (
             <div className="space-y-1">
               <div className="px-2 pb-2 text-xs font-semibold text-[var(--text-secondary)]">
-                Bab & Bagian Buku
+                Daftar Bab
               </div>
               {toc.length === 0 ? (
                 <p className="p-3 text-xs italic text-[var(--text-secondary)]">
@@ -216,7 +231,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
               {currentBookBookmarks.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]">
-                  Belum ada halaman yang ditandai pada buku ini. Tekan ⌘D atau ikon penanda di atas.
+                  Belum ada halaman ditandai. Tekan ⌘D atau ikon penanda.
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -264,7 +279,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
               {vocabList.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]">
-                  Kamus pribadi masih kosong. Sorot kata asing saat membaca lalu pilih Simpan Kosakata.
+                  Sorot kata asing saat membaca lalu pilih Simpan Kosakata.
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -296,27 +311,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
 
-        {/* Sidebar Footer Actions */}
-        <div className="space-y-2 border-t border-[var(--border-color)] p-3 text-xs">
-          <button
-            type="button"
-            onClick={() => {
-              onLoadSampleBook();
-              onCloseMobile();
-            }}
-            className="mac-surface flex w-full items-center justify-center gap-2 rounded-xl border px-3 py-2 font-semibold transition hover:bg-slate-500/10"
-          >
-            <BookMarked className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-            Muat Buku Contoh Bawaan
-          </button>
+        {/* Minimal Sidebar Footer */}
+        <div className="border-t border-[var(--border-color)] p-2.5 text-xs">
           <button
             type="button"
             onClick={onOpenShortcuts}
-            className="flex w-full items-center justify-between rounded-xl px-3 py-1.5 text-[var(--text-secondary)] transition hover:bg-slate-500/10 hover:text-[var(--text-primary)]"
+            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10 hover:text-[var(--text-primary)]"
           >
             <span className="flex items-center gap-2 font-medium">
               <Keyboard className="h-3.5 w-3.5" />
-              Pintasan MacBook
+              Pintasan Keyboard
             </span>
             <kbd className="font-mono-mac text-[11px]">⌘/</kbd>
           </button>

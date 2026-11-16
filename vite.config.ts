@@ -11,13 +11,19 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png'],
+        includeAssets: [
+          'icon.svg',
+          'icon-512.png',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+        ],
         manifest: {
           id: '/',
-          name: 'PustakaMac — Pembaca EPUB & Terjemahan AI',
-          short_name: 'PustakaMac',
+          name: 'PustakaLoka — Pembaca EPUB & Terjemahan AI',
+          short_name: 'PustakaLoka',
           description:
-            'Aplikasi baca EPUB untuk MacBook dengan terjemahan AI kontekstual, mode bilingual, pustaka luring, dan kamus kosakata pribadi.',
+            'PustakaLoka — Aplikasi baca EPUB lintas perangkat dengan terjemahan AI kontekstual, mode bilingual, pustaka luring, dan kamus kosakata pribadi.',
           theme_color: '#f7f7f8',
           background_color: '#f7f7f8',
           display: 'standalone',
@@ -31,7 +37,7 @@ export default defineConfig(() => {
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/icon-512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',

@@ -8,22 +8,25 @@ interface BeforeInstallPromptEvent extends Event {
 export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
-  const [isSafariMac, setIsSafariMac] = useState(false);
+  const [isElectron, setIsElectron] = useState(false);
+  const [isAndroid, setIsAndroid] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
 
   useEffect(() => {
+    const runningInElectron = Boolean(
+      (window as unknown as { macDesktop?: { isElectron?: boolean } }).macDesktop?.isElectron
+    );
+    setIsElectron(runningInElectron);
+
     const isStandalone =
+      runningInElectron ||
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true;
     setIsInstalled(isStandalone);
 
     const ua = window.navigator.userAgent;
-    const isIOSDevice = /iPhone|iPad|iPod/i.test(ua);
-    const isMac = /Macintosh|Mac OS X/i.test(ua);
-    const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|Edg/i.test(ua);
-
-    setIsIOS(isIOSDevice);
-    setIsSafariMac(isMac && isSafari && !isIOSDevice);
+    setIsAndroid(/Android/i.test(ua));
+    setIsIOS(/iPhone|iPad|iPod/i.test(ua));
 
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
@@ -59,7 +62,8 @@ export function usePWAInstall() {
   return {
     isInstallable: !!deferredPrompt,
     isInstalled,
-    isSafariMac,
+    isElectron,
+    isAndroid,
     isIOS,
     install,
   };

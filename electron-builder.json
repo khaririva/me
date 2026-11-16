@@ -1,0 +1,42 @@
+{
+  "appId": "com.pustakamac.epubreader",
+  "productName": "PustakaLoka",
+  "icon": "assets/icon.png",
+  "directories": {
+    "output": "release",
+    "buildResources": "assets"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "assets/icon.png",
+    "public/icon-512.png",
+    "package.json"
+  ],
+  "mac": {
+    "category": "public.app-category.books",
+    "icon": "assets/icon.png",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["arm64", "x64"]
+      }
+    ],
+    "darkModeSupport": true
+  },
+  "dmg": {
+    "title": "PustakaLoka Installer",
+    "contents": [
+      {
+        "x": 130,
+        "y": 220
+      },
+      {
+        "x": 410,
+        "y": 220,
+        "type": "link",
+        "path": "/Applications"
+      }
+    ]
+  }
+}

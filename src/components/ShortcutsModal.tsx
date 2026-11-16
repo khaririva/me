@@ -7,13 +7,15 @@ interface ShortcutsModalProps {
 }
 
 const SHORTCUTS = [
-  { keys: '⌘ O', label: 'Unggah / Buka file EPUB dari Finder' },
-  { keys: '⌘ \\', label: 'Tampilkan atau sembunyikan sidebar pustaka' },
-  { keys: '⌘ T', label: 'Terjemahkan halaman atau bab aktif' },
+  { keys: '← / →', label: 'Pindah halaman (Mode Halaman) atau pindah bab (Mode Scroll)' },
+  { keys: '↑ / ↓', label: 'Gulir bacaan ke atas atau ke bawah dengan mulus (Mode Scroll)' },
+  { keys: '⌘ L', label: 'Buka menu Book List' },
+  { keys: '⌘ O', label: 'Buka file EPUB dari perangkat' },
+  { keys: '⌘ \\', label: 'Tampilkan atau sembunyikan sidebar daftar isi' },
+  { keys: '⌘ T', label: 'Terjemahkan bab aktif (Hybrid Translate)' },
   { keys: '⌘ D', label: 'Tandai posisi halaman saat ini' },
-  { keys: '⌘ F', label: 'Aktifkan atau keluar dari Mode Fokus Baca' },
-  { keys: '← / →', label: 'Pindah ke halaman sebelumnya atau berikutnya' },
-  { keys: 'Esc', label: 'Tutup panel atau keluar dari Mode Fokus' },
+  { keys: '⌘ F', label: 'Tampilkan atau sembunyikan bilah alat (Fokus Baca)' },
+  { keys: 'Esc', label: 'Tutup modal atau tampilkan kembali bilah alat' },
 ];
 
 export const ShortcutsModal: React.FC<ShortcutsModalProps> = ({ open, onClose }) => {
@@ -31,7 +33,7 @@ export const ShortcutsModal: React.FC<ShortcutsModalProps> = ({ open, onClose })
         <div className="flex items-center justify-between gap-4 border-b border-[var(--border-color)] pb-3">
           <div className="flex items-center gap-2.5">
             <Keyboard className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-            <h3 className="text-base font-bold">Pintasan Papan Ketik MacBook</h3>
+            <h3 className="text-base font-bold">Pintasan Papan Ketik</h3>
           </div>
           <button
             type="button"

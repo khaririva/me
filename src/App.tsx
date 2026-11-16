@@ -1,41 +1,50 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ePub, { type Book, type Rendition } from 'epubjs';
 import {
-  BookA,
-  BookOpen,
   Bookmark,
   BookmarkPlus,
   ChevronLeft,
   ChevronRight,
   Download,
   Languages,
-  Laptop,
-  Maximize2,
-  Minimize2,
+  Library,
   PanelLeft,
   Pause,
   Play,
+  Settings,
   Sparkles,
   Type as TypeIcon,
   Upload,
   WifiOff,
   X,
 } from 'lucide-react';
-import { PWAInstallModal } from './components/PWAInstallModal';
-import { SettingsPopover, TARGET_LANGUAGES } from './components/SettingsPopover';
+import { ApiSettingsModal } from './components/ApiSettingsModal';
+import { BookListModal } from './components/BookListModal';
+import { SettingsPopover } from './components/SettingsPopover';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { Sidebar } from './components/Sidebar';
 import { TranslationDrawer } from './components/TranslationDrawer';
 import { useOnlineStatus, usePWAInstall } from './hooks/usePWAInstall';
-import { translateContextualApi, translateParagraphsApi, translateVocabApi } from './lib/api';
+import {
+  checkServerHealthApi,
+  getClientActiveApiKey,
+  polishChapterTranslationsDetailedApi,
+  translateChapterDraftApi,
+  translateContextualApi,
+  translateVocabApi,
+} from './lib/api';
 import { SAMPLE_BOOK_ID, createSampleEpubBuffer } from './lib/sampleEpub';
 import { BookTranslationDB, LibraryDB } from './lib/storage';
+import { sanitizeTextForTranslation } from './lib/textSanitize';
 import type {
   BatchJobState,
   BookmarkItem,
   ChapterTranslation,
   LibraryBookMeta,
+  ReaderContentWidth,
+  ReaderFlow,
   ReaderFont,
+  ReaderTextAlign,
   ReaderTheme,
   ReadingMode,
   SidebarTab,
@@ -56,10 +65,32 @@ interface RenditionLocation {
   };
 }
 
+interface RenditionContentsItem {
+  document: Document;
+  window: Window;
+  section?: {
+    href?: string;
+  };
+}
+
 interface SpineSection {
   href: string;
   load: (loader: unknown) => Promise<Document>;
 }
+
+const BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, blockquote';
+
+const CONTENT_WIDTH_PX: Record<ReaderContentWidth, number> = {
+  narrow: 620,
+  medium: 760,
+  wide: 940,
+};
+
+const CONTENT_WIDTH_CLASS: Record<ReaderContentWidth, string> = {
+  narrow: 'max-w-[660px]',
+  medium: 'max-w-[820px]',
+  wide: 'max-w-[1020px]',
+};
 
 function escapeHtml(str: string): string {
   return str
@@ -70,8 +101,106 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
+function normalizeBlockText(text: string): string {
+  return sanitizeTextForTranslation(text);
+}
+
+function normalizeHref(href?: string | null): string {
+  if (!href) return '';
+  const raw = href.split('#')[0];
+  try {
+    return decodeURIComponent(raw).replace(/^\/+/, '').replace(/^\.\//, '');
+  } catch {
+    return raw.replace(/^\/+/, '').replace(/^\.\//, '');
+  }
+}
+
+function hrefMatches(a?: string | null, b?: string | null): boolean {
+  const na = normalizeHref(a);
+  const nb = normalizeHref(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`)) return true;
+  const baseA = na.split('/').pop() || '';
+  const baseB = nb.split('/').pop() || '';
+  return Boolean(baseA && baseB && baseA === baseB);
+}
+
+function getTranslatableBlocks(doc: Document): HTMLElement[] {
+  const all = Array.from(doc.querySelectorAll(BLOCK_SELECTOR)) as HTMLElement[];
+  return all.filter((el) => {
+    if (el.querySelector(BLOCK_SELECTOR)) return false;
+    const text = normalizeBlockText(el.dataset?.origText || el.textContent || '');
+    return text.length > 0;
+  });
+}
+
+function captureOriginalBlocks(doc: Document): HTMLElement[] {
+  const blocks = getTranslatableBlocks(doc);
+  blocks.forEach((node) => {
+    if (!node.dataset.origHtml) {
+      node.dataset.origHtml = node.innerHTML;
+      node.dataset.origText = normalizeBlockText(node.textContent || '');
+    }
+  });
+  return blocks;
+}
+
+function injectTranslationIntoDocument(
+  doc: Document,
+  mode: ReadingMode,
+  cachedChapter?: ChapterTranslation
+): boolean {
+  if (!doc?.body) return false;
+  const blocks = captureOriginalBlocks(doc);
+  if (blocks.length === 0) return false;
+
+  if (mode === 'original') {
+    blocks.forEach((node) => {
+      if (node.dataset.origHtml !== undefined) {
+        node.innerHTML = node.dataset.origHtml;
+      }
+    });
+    return true;
+  }
+
+  if (!cachedChapter || cachedChapter.pairs.length === 0) return false;
+
+  const translationMap = new Map<string, string>();
+  cachedChapter.pairs.forEach((p) => {
+    translationMap.set(normalizeBlockText(p.orig), p.trans);
+  });
+
+  let appliedAny = false;
+  blocks.forEach((node, idx) => {
+    const origText = normalizeBlockText(node.dataset.origText || node.textContent || '');
+    const pairAtIdx = cachedChapter.pairs[idx];
+    const translatedText =
+      (pairAtIdx && normalizeBlockText(pairAtIdx.orig) === origText ? pairAtIdx.trans : null) ||
+      translationMap.get(origText) ||
+      pairAtIdx?.trans ||
+      null;
+    if (!translatedText) return;
+
+    if (mode === 'translated') {
+      node.textContent = translatedText;
+      appliedAny = true;
+    } else if (mode === 'bilingual') {
+      const origHtml = node.dataset.origHtml ?? escapeHtml(origText);
+      node.innerHTML = `${origHtml}<span class="ai-bilingual-trans">${escapeHtml(
+        translatedText
+      )}</span>`;
+      appliedAny = true;
+    }
+  });
+
+  return appliedAny;
+}
+
+type ChapterPolishStatus = 'idle' | 'drafting' | 'polishing' | 'polished' | 'draft-only';
+
 export default function App() {
-  // Preferences & UI State
+  // Appearance & Typography Preferences (persisted in localStorage)
   const [theme, setTheme] = useState<ReaderTheme>(
     () => (localStorage.getItem('reader_theme') as ReaderTheme) || 'light'
   );
@@ -79,10 +208,20 @@ export default function App() {
     () => (localStorage.getItem('reader_font') as ReaderFont) || 'serif'
   );
   const [fontSize, setFontSize] = useState<number>(() =>
-    parseInt(localStorage.getItem('reader_font_size') || '100', 10)
+    Math.min(180, Math.max(70, parseInt(localStorage.getItem('reader_font_size') || '100', 10)))
   );
   const [lineHeight, setLineHeight] = useState<number>(() =>
-    parseFloat(localStorage.getItem('reader_line_height') || '1.75')
+    Math.min(2.2, Math.max(1.4, parseFloat(localStorage.getItem('reader_line_height') || '1.75')))
+  );
+  const [paragraphSpacing, setParagraphSpacing] = useState<number>(() =>
+    Math.min(32, Math.max(8, parseInt(localStorage.getItem('reader_paragraph_spacing') || '16', 10)))
+  );
+  const [contentWidth, setContentWidth] = useState<ReaderContentWidth>(() => {
+    const stored = localStorage.getItem('reader_content_width');
+    return stored === 'narrow' || stored === 'wide' ? stored : 'medium';
+  });
+  const [textAlign, setTextAlign] = useState<ReaderTextAlign>(() =>
+    localStorage.getItem('reader_text_align') === 'justify' ? 'justify' : 'left'
   );
   const [targetLang, setTargetLang] = useState<string>(
     () => localStorage.getItem('reader_target_lang') || 'Bahasa Indonesia'
@@ -90,15 +229,20 @@ export default function App() {
   const [readingMode, setReadingMode] = useState<ReadingMode>(
     () => (localStorage.getItem('reader_reading_mode') as ReadingMode) || 'original'
   );
+  const [readerFlow, setReaderFlow] = useState<ReaderFlow>(() =>
+    localStorage.getItem('reader_flow') === 'scroll' ? 'scroll' : 'paginated'
+  );
 
-  // Layout & Modals
-  const [sidebarDesktopOpen, setSidebarDesktopOpen] = useState(true);
+  // Layout, Auto-Hide Chrome & Modals
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const [sidebarDesktopOpen, setSidebarDesktopOpen] = useState(false);
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('toc');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [installModalOpen, setInstallModalOpen] = useState(false);
+  const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
+  const [hasServerEnvKey, setHasServerEnvKey] = useState(false);
+  const [bookListOpen, setBookListOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [focusMode, setFocusMode] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   // Book & Reader State
@@ -137,8 +281,10 @@ export default function App() {
   const [drawerLoading, setDrawerLoading] = useState<boolean>(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
 
-  // Full-Book Batch Translation
+  // Full-Book Batch Translation & Two-Stage Polish Status
   const [hasCachedChapters, setHasCachedChapters] = useState<boolean>(false);
+  const [chapterPolishStatus, setChapterPolishStatus] = useState<ChapterPolishStatus>('idle');
+  const [polishFallbackReason, setPolishFallbackReason] = useState<string | null>(null);
   const [showBatchBar, setShowBatchBar] = useState<boolean>(false);
   const [batchState, setBatchState] = useState<BatchJobState>({
     running: false,
@@ -153,11 +299,14 @@ export default function App() {
   // Toasts
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // PWA & Online Status
-  const { isInstallable, isInstalled, isSafariMac, isIOS, install } = usePWAInstall();
+  // Platform Runtime & Online Status
+  const { isElectron } = usePWAInstall();
   const isOnline = useOnlineStatus();
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 640 : false
+  );
 
-  // Mutable Refs for EPUB.js & Async Loops
+  // Mutable Refs for EPUB.js, AbortControllers & Async Loops
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const bookRef = useRef<Book | null>(null);
@@ -169,9 +318,16 @@ export default function App() {
   const currentSpineHrefRef = useRef<string | null>(null);
   const locationsReadyRef = useRef<boolean>(false);
   const readingModeRef = useRef<ReadingMode>(readingMode);
+  const readerFlowRef = useRef<ReaderFlow>(readerFlow);
   const targetLangRef = useRef<string>(targetLang);
+  const hasServerEnvKeyRef = useRef<boolean>(hasServerEnvKey);
   const chapterCacheRef = useRef<Record<string, ChapterTranslation>>({});
   const activeSectionTranslatingRef = useRef<string | null>(null);
+  const chapterAbortControllerRef = useRef<AbortController | null>(null);
+  const backgroundPolishInFlightRef = useRef<Set<string>>(new Set());
+  const scrollLastTopRef = useRef<number>(0);
+  const scrollContainerBoundRef = useRef<HTMLElement | null>(null);
+  const isAnyModalOpenRef = useRef<boolean>(false);
   const batchControlRef = useRef<{ running: boolean; paused: boolean; cancelled: boolean }>({
     running: false,
     paused: false,
@@ -179,14 +335,47 @@ export default function App() {
   });
 
   useEffect(() => {
+    isAnyModalOpenRef.current = Boolean(
+      apiSettingsOpen || bookListOpen || shortcutsOpen || settingsOpen
+    );
+  }, [apiSettingsOpen, bookListOpen, settingsOpen, shortcutsOpen]);
+
+  const effectiveChromeVisible =
+    chromeVisible ||
+    settingsOpen ||
+    apiSettingsOpen ||
+    bookListOpen ||
+    shortcutsOpen ||
+    drawerOpen ||
+    showBatchBar ||
+    sidebarMobileOpen ||
+    Boolean(loaderText);
+
+  useEffect(() => {
     readingModeRef.current = readingMode;
     localStorage.setItem('reader_reading_mode', readingMode);
   }, [readingMode]);
 
   useEffect(() => {
+    readerFlowRef.current = readerFlow;
+    localStorage.setItem('reader_flow', readerFlow);
+  }, [readerFlow]);
+
+  useEffect(() => {
     targetLangRef.current = targetLang;
     localStorage.setItem('reader_target_lang', targetLang);
   }, [targetLang]);
+
+  useEffect(() => {
+    hasServerEnvKeyRef.current = hasServerEnvKey;
+  }, [hasServerEnvKey]);
+
+  useEffect(() => {
+    checkServerHealthApi().then((health) => {
+      hasServerEnvKeyRef.current = health.hasDefaultEnvKey;
+      setHasServerEnvKey(health.hasDefaultEnvKey);
+    });
+  }, []);
 
   const showToast = useCallback((text: string, type: ToastMessage['type'] = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -196,7 +385,15 @@ export default function App() {
     }, 3200);
   }, []);
 
-  // Sync HTML theme classes & theme-color meta for MacBook titlebar
+  const abortActiveChapterTranslation = useCallback(() => {
+    if (chapterAbortControllerRef.current) {
+      chapterAbortControllerRef.current.abort();
+      chapterAbortControllerRef.current = null;
+    }
+    activeSectionTranslatingRef.current = null;
+  }, []);
+
+  // Sync HTML theme classes & theme-color meta
   useEffect(() => {
     const html = document.documentElement;
     html.classList.remove('dark', 'theme-sepia');
@@ -216,11 +413,14 @@ export default function App() {
     }
   }, [theme]);
 
-  // Apply typography and palette styles inside EPUB iframe
+  // Apply complete typography & comfort styles inside EPUB iframe
   const applyRenditionStyling = useCallback(() => {
     localStorage.setItem('reader_font', fontFamily);
     localStorage.setItem('reader_font_size', String(fontSize));
     localStorage.setItem('reader_line_height', String(lineHeight));
+    localStorage.setItem('reader_paragraph_spacing', String(paragraphSpacing));
+    localStorage.setItem('reader_content_width', contentWidth);
+    localStorage.setItem('reader_text_align', textAlign);
 
     const rendition = renditionRef.current;
     if (!rendition) return;
@@ -254,6 +454,8 @@ export default function App() {
       fontFamily === 'serif'
         ? "'Lora', Georgia, serif"
         : "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif";
+    const isScroll = readerFlow === 'scroll';
+    const columnWidthPx = CONTENT_WIDTH_PX[contentWidth];
 
     rendition.themes.register('custom', {
       body: {
@@ -261,9 +463,25 @@ export default function App() {
         color: `${palette.color} !important`,
         'font-family': `${fontStack} !important`,
         'line-height': `${lineHeight} !important`,
-        padding: '24px 32px !important',
+        'text-align': `${textAlign} !important`,
+        ...(isScroll
+          ? {
+              'max-width': `${columnWidthPx}px !important`,
+              margin: '0 auto !important',
+              padding: `${isMobileViewport ? '64px 18px 80px' : '72px 36px 88px'} !important`,
+            }
+          : {
+              padding: `${isMobileViewport ? '54px 18px 60px' : '58px 36px 64px'} !important`,
+            }),
       },
-      'p, div, span, li, blockquote': {
+      'p, li, blockquote': {
+        color: `${palette.color} !important`,
+        'font-family': `${fontStack} !important`,
+        'line-height': `${lineHeight} !important`,
+        'margin-bottom': `${paragraphSpacing}px !important`,
+        'text-align': `${textAlign} !important`,
+      },
+      'div, span': {
         color: `${palette.color} !important`,
         'font-family': `${fontStack} !important`,
         'line-height': `${lineHeight} !important`,
@@ -271,180 +489,620 @@ export default function App() {
       'h1, h2, h3, h4': {
         color: `${palette.color} !important`,
         'font-family': `${fontStack} !important`,
-        'margin-bottom': '0.75em !important',
+        'margin-bottom': `${Math.max(12, Math.round(paragraphSpacing * 0.9))}px !important`,
       },
       a: {
         color: `${palette.link} !important`,
       },
       '.ai-bilingual-trans': {
         display: 'block',
-        'margin-top': '0.5em',
-        'margin-bottom': '1.15em',
+        'margin-top': '0.45em',
+        'margin-bottom': `${Math.max(8, Math.round(paragraphSpacing * 0.75))}px`,
         padding: '0.65em 0.9em',
         border: `1px solid ${palette.bilingualBorder}`,
         'background-color': palette.bilingualBg,
         'border-radius': '8px',
         'font-size': '0.94em',
+        'text-align': `${textAlign} !important`,
         opacity: '0.95',
+      },
+      '.pl-scroll-chapter-nav': {
+        display: 'flex',
+        'justify-content': 'space-between',
+        'align-items': 'center',
+        gap: '12px',
+        'flex-wrap': 'wrap',
+        'margin-top': '2.5em',
+        'padding-top': '1.5em',
+        'border-top': `1px solid ${palette.bilingualBorder}`,
+      },
+      '.pl-scroll-nav-btn': {
+        display: 'inline-flex',
+        'align-items': 'center',
+        'justify-content': 'center',
+        padding: '0.65em 1.2em',
+        'border-radius': '10px',
+        border: `1px solid ${palette.bilingualBorder}`,
+        'background-color': palette.bilingualBg,
+        color: `${palette.color} !important`,
+        'font-family': "'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important",
+        'font-size': '0.9rem',
+        'font-weight': '600',
+        cursor: 'pointer',
+      },
+      '.pl-scroll-nav-btn:disabled': {
+        opacity: '0.4',
+        cursor: 'not-allowed',
+      },
+      '.pl-scroll-nav-btn-primary': {
+        'background-color': `${palette.link} !important`,
+        'border-color': `${palette.link} !important`,
+        color: '#ffffff !important',
       },
     });
     rendition.themes.select('custom');
     rendition.themes.fontSize(`${fontSize}%`);
-  }, [fontFamily, fontSize, lineHeight, theme]);
+  }, [contentWidth, fontFamily, fontSize, isMobileViewport, lineHeight, paragraphSpacing, readerFlow, textAlign, theme]);
 
   useEffect(() => {
     applyRenditionStyling();
   }, [applyRenditionStyling]);
 
-  // Extract paragraph blocks from an EPUB spine section
+  const safeResizeRendition = useCallback(() => {
+    const rendition = renditionRef.current as
+      | (Rendition & { manager?: { resize?: unknown } })
+      | null;
+    const container = viewerRef.current;
+    if (!rendition || !rendition.manager || !container) return;
+    if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
+    try {
+      rendition.resize(container.clientWidth, container.clientHeight);
+    } catch {
+      // ignore transient resize errors while switching books
+    }
+  }, []);
+
+  // Re-measure rendition cleanly when reading column width changes in paginated mode
+  useEffect(() => {
+    const timer = setTimeout(safeResizeRendition, 120);
+    return () => clearTimeout(timer);
+  }, [contentWidth, safeResizeRendition]);
+
+  const expandScrolledViews = useCallback(() => {
+    if (readerFlowRef.current !== 'scroll') return;
+    const rendition = renditionRef.current;
+    if (!rendition || typeof rendition.views !== 'function') return;
+    try {
+      const views = rendition.views() as unknown as Array<{ expand?: () => void }> | undefined;
+      views?.forEach((v) => v?.expand?.());
+    } catch {
+      // ignore transient view expansion errors
+    }
+  }, []);
+
+  const bindScrollAutoHide = useCallback(() => {
+    const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+    if (!container || scrollContainerBoundRef.current === container) return;
+    scrollContainerBoundRef.current = container;
+    scrollLastTopRef.current = container.scrollTop;
+
+    container.addEventListener(
+      'scroll',
+      () => {
+        if (readerFlowRef.current !== 'scroll') return;
+        const st = container.scrollTop;
+        const delta = st - scrollLastTopRef.current;
+        scrollLastTopRef.current = st;
+
+        if (st <= 16) {
+          setChromeVisible(true);
+        } else if (delta > 18 && st > 56) {
+          setChromeVisible(false);
+        } else if (delta < -28) {
+          setChromeVisible(true);
+        }
+      },
+      { passive: true }
+    );
+  }, []);
+
+  const scrollReaderVertical = useCallback((deltaY: number) => {
+    const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+    if (!container) return;
+    container.scrollBy({ top: deltaY, behavior: 'smooth' });
+  }, []);
+
+  const navigateReader = useCallback((direction: 'prev' | 'next') => {
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+    const scrollToTopIfScrollMode = () => {
+      if (readerFlowRef.current !== 'scroll') return;
+      const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+      if (container) container.scrollTo({ top: 0, behavior: 'auto' });
+    };
+
+    if (direction === 'prev') {
+      void Promise.resolve(rendition.prev()).then(scrollToTopIfScrollMode);
+    } else {
+      void Promise.resolve(rendition.next()).then(scrollToTopIfScrollMode);
+    }
+  }, []);
+
+  const navigateReaderRef = useRef(navigateReader);
+  const scrollReaderVerticalRef = useRef(scrollReaderVertical);
+  useEffect(() => {
+    navigateReaderRef.current = navigateReader;
+  }, [navigateReader]);
+  useEffect(() => {
+    scrollReaderVerticalRef.current = scrollReaderVertical;
+  }, [scrollReaderVertical]);
+
+  const syncScrollNavFooterInDoc = useCallback(
+    (doc: Document, sectionHref?: string) => {
+      if (!doc?.body) return;
+      const existing = doc.getElementById('pl-scroll-chapter-nav');
+      if (readerFlowRef.current !== 'scroll') {
+        if (existing) existing.remove();
+        return;
+      }
+
+      const spineItems = ((bookRef.current?.spine as unknown as { spineItems?: SpineSection[] })
+        ?.spineItems || []) as SpineSection[];
+      const targetHref = sectionHref || currentSpineHrefRef.current || '';
+      const currentIdx = spineItems.findIndex((s) => hrefMatches(s.href, targetHref));
+      const hasPrev = currentIdx > 0;
+      const hasNext =
+        currentIdx >= 0 ? currentIdx < spineItems.length - 1 : spineItems.length > 1;
+
+      let navEl = existing;
+      if (!navEl) {
+        navEl = doc.createElement('div');
+        navEl.id = 'pl-scroll-chapter-nav';
+        navEl.className = 'pl-scroll-chapter-nav';
+
+        const prevBtn = doc.createElement('button');
+        prevBtn.type = 'button';
+        prevBtn.dataset.plNav = 'prev';
+        prevBtn.className = 'pl-scroll-nav-btn';
+        prevBtn.textContent = '← Bab Sebelumnya';
+        prevBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          navigateReaderRef.current('prev');
+        });
+
+        const nextBtn = doc.createElement('button');
+        nextBtn.type = 'button';
+        nextBtn.dataset.plNav = 'next';
+        nextBtn.className = 'pl-scroll-nav-btn pl-scroll-nav-btn-primary';
+        nextBtn.textContent = 'Bab Berikutnya →';
+        nextBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          navigateReaderRef.current('next');
+        });
+
+        navEl.appendChild(prevBtn);
+        navEl.appendChild(nextBtn);
+        doc.body.appendChild(navEl);
+      }
+
+      const prevButton = navEl.querySelector('button[data-pl-nav="prev"]') as HTMLButtonElement | null;
+      const nextButton = navEl.querySelector('button[data-pl-nav="next"]') as HTMLButtonElement | null;
+      if (prevButton) prevButton.disabled = !hasPrev;
+      if (nextButton) nextButton.disabled = !hasNext;
+
+      setTimeout(() => {
+        expandScrolledViews();
+        bindScrollAutoHide();
+      }, 40);
+    },
+    [bindScrollAutoHide, expandScrolledViews]
+  );
+
+  const findCachedChapterInMemory = useCallback(
+    (href?: string): ChapterTranslation | undefined => {
+      if (!href) return undefined;
+      const cache = chapterCacheRef.current;
+      const direct = cache[href] || cache[href.split('#')[0]];
+      if (direct) return direct;
+      const matchedKey = Object.keys(cache).find((k) => hrefMatches(k, href));
+      return matchedKey ? cache[matchedKey] : undefined;
+    },
+    []
+  );
+
+  // Extract sanitized paragraph blocks from live DOM or EPUB spine section
   const extractSectionParagraphs = useCallback(async (section: SpineSection): Promise<string[]> => {
+    try {
+      const rendition = renditionRef.current;
+      if (rendition) {
+        const contentsList = (rendition.getContents() || []) as unknown as RenditionContentsItem[];
+        const liveContent = contentsList.find((c) =>
+          hrefMatches(c.section?.href || currentSpineHrefRef.current || '', section.href)
+        );
+        if (liveContent?.document?.body) {
+          const blocks = captureOriginalBlocks(liveContent.document);
+          if (blocks.length > 0) {
+            return blocks
+              .map((b) => normalizeBlockText(b.dataset.origText || b.textContent || ''))
+              .filter((t) => t.length > 0);
+          }
+        }
+      }
+    } catch {
+      // fallback to section.load
+    }
+
     const book = bookRef.current;
     if (!book) return [];
     try {
       const doc = await section.load(book.load.bind(book));
       if (!doc) return [];
-      const nodes = Array.from(doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote'));
-      const texts = nodes
-        .map((n) => (n.textContent || '').replace(/\s+/g, ' ').trim())
+      const blocks = getTranslatableBlocks(doc);
+      return blocks
+        .map((n) => normalizeBlockText(n.textContent || ''))
         .filter((t) => t.length > 0);
-      const unique: string[] = [];
-      for (let i = 0; i < texts.length; i++) {
-        if (i === 0 || texts[i] !== texts[i - 1]) unique.push(texts[i]);
-      }
-      return unique;
     } catch {
       return [];
     }
   }, []);
 
-  // Translate and cache one chapter section
-  const translateAndCacheSection = useCallback(
-    async (section: SpineSection): Promise<ChapterTranslation | null> => {
-      if (!section?.href) return null;
-      const hrefKey = section.href.split('#')[0];
-      const existing = chapterCacheRef.current[hrefKey];
-      if (existing && existing.pairs.length > 0) {
-        return existing;
+  const syncActiveIframesForHref = useCallback(
+    (hrefKey: string, record: ChapterTranslation) => {
+      if (readingModeRef.current === 'original') return;
+      const activeHref = currentSpineHrefRef.current;
+      if (activeHref && !hrefMatches(activeHref, hrefKey)) return;
+
+      const contentsList = (renditionRef.current?.getContents() ||
+        []) as unknown as RenditionContentsItem[];
+      contentsList.forEach((c) => {
+        const cHref = c.section?.href || '';
+        if (cHref && hrefMatches(cHref, hrefKey) && c.document?.body) {
+          injectTranslationIntoDocument(c.document, readingModeRef.current, record);
+          syncScrollNavFooterInDoc(c.document, cHref);
+        }
+      });
+      setTimeout(expandScrolledViews, 50);
+    },
+    [expandScrolledViews, syncScrollNavFooterInDoc]
+  );
+
+  const setStatusIfActiveHref = useCallback((hrefKey: string, status: ChapterPolishStatus) => {
+    if (readingModeRef.current === 'original') {
+      setChapterPolishStatus('idle');
+      return;
+    }
+    const activeHref = currentSpineHrefRef.current;
+    if (activeHref && hrefMatches(activeHref, hrefKey)) {
+      setChapterPolishStatus(status);
+    }
+  }, []);
+
+  // Stage 2 (Background AI Polish) with AbortController & Active-Chapter Guard
+  const runBackgroundAiPolish = useCallback(
+    async (
+      hrefKey: string,
+      paragraphs: string[],
+      drafts: string[],
+      signal?: AbortSignal
+    ): Promise<ChapterTranslation | null> => {
+      if (signal?.aborted) return null;
+      const bookId = currentBookIdRef.current;
+      const bookTitle = currentBookTitleRef.current;
+      const lang = targetLangRef.current;
+      const jobKey = `${bookId}::${lang}::${hrefKey}`;
+
+      if (backgroundPolishInFlightRef.current.has(jobKey)) {
+        return null;
       }
 
-      const paragraphs = await extractSectionParagraphs(section);
+      const canRunAi = Boolean(getClientActiveApiKey() || hasServerEnvKeyRef.current);
+      if (!canRunAi) {
+        setPolishFallbackReason(null);
+        setStatusIfActiveHref(hrefKey, 'draft-only');
+        return null;
+      }
+
+      backgroundPolishInFlightRef.current.add(jobKey);
+      setPolishFallbackReason(null);
+      setStatusIfActiveHref(hrefKey, 'polishing');
+
+      try {
+        const items = paragraphs.map((original, id) => ({
+          id,
+          original: sanitizeTextForTranslation(original),
+          draft: sanitizeTextForTranslation(drafts[id] || original),
+        }));
+
+        const polishResult = await polishChapterTranslationsDetailedApi(
+          items,
+          lang,
+          hasServerEnvKeyRef.current,
+          signal
+        );
+
+        if (signal?.aborted || polishResult.errorCode === 'ABORTED') return null;
+
+        const polishedList = polishResult.polished;
+        if (!polishedList || polishedList.length === 0) {
+          setPolishFallbackReason(polishResult.reason || null);
+          setStatusIfActiveHref(hrefKey, 'draft-only');
+          return null;
+        }
+
+        const polishedRecord: ChapterTranslation = {
+          href: hrefKey,
+          pairs: paragraphs.map((orig, idx) => ({
+            orig,
+            trans: polishedList[idx] || drafts[idx] || orig,
+          })),
+          stage: 'polished',
+          updatedAt: Date.now(),
+        };
+
+        if (currentBookIdRef.current === bookId && targetLangRef.current === lang) {
+          chapterCacheRef.current[hrefKey] = polishedRecord;
+          setHasCachedChapters(true);
+          await BookTranslationDB.saveBookCache(bookId, lang, bookTitle, chapterCacheRef.current);
+          // Hanya perbarui DOM bila pengguna masih berada di bab yang sama
+          if (hrefMatches(currentSpineHrefRef.current, hrefKey)) {
+            syncActiveIframesForHref(hrefKey, polishedRecord);
+            setPolishFallbackReason(null);
+            setStatusIfActiveHref(hrefKey, 'polished');
+          }
+        } else {
+          const otherCache = await BookTranslationDB.getBookCache(bookId, lang);
+          otherCache[hrefKey] = polishedRecord;
+          await BookTranslationDB.saveBookCache(bookId, lang, bookTitle, otherCache);
+        }
+
+        return polishedRecord;
+      } catch (err) {
+        if (!signal?.aborted) {
+          setPolishFallbackReason(
+            err instanceof Error ? err.message : 'Gagal memperhalus terjemahan dengan AI.'
+          );
+          setStatusIfActiveHref(hrefKey, 'draft-only');
+        }
+        return null;
+      } finally {
+        backgroundPolishInFlightRef.current.delete(jobKey);
+      }
+    },
+    [setStatusIfActiveHref, syncActiveIframesForHref]
+  );
+
+  // Two-Stage Hybrid Translation helper
+  const translateParagraphsTwoStage = useCallback(
+    async (
+      hrefKey: string,
+      paragraphs: string[],
+      options?: { waitForPolish?: boolean; signal?: AbortSignal }
+    ): Promise<ChapterTranslation> => {
       if (paragraphs.length === 0) {
-        const emptyRec: ChapterTranslation = { href: hrefKey, pairs: [], updatedAt: Date.now() };
+        const emptyRec: ChapterTranslation = {
+          href: hrefKey,
+          pairs: [],
+          stage: 'polished',
+          updatedAt: Date.now(),
+        };
         chapterCacheRef.current[hrefKey] = emptyRec;
         return emptyRec;
       }
 
-      const translatedList = await translateParagraphsApi(paragraphs, targetLangRef.current);
-      const pairs = paragraphs.map((orig, idx) => ({
-        orig,
-        trans: translatedList[idx] || orig,
-      }));
+      const bookId = currentBookIdRef.current;
+      const bookTitle = currentBookTitleRef.current;
+      const lang = targetLangRef.current;
+      const signal = options?.signal;
 
-      const record: ChapterTranslation = {
+      // Stage 1: Instant Draft (< 1s)
+      setStatusIfActiveHref(hrefKey, 'drafting');
+      const drafts = await translateChapterDraftApi(paragraphs, lang, signal);
+      if (signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+
+      const draftRecord: ChapterTranslation = {
         href: hrefKey,
-        pairs,
+        pairs: paragraphs.map((orig, idx) => ({
+          orig,
+          trans: drafts[idx] || orig,
+        })),
+        stage: 'draft',
         updatedAt: Date.now(),
       };
 
-      chapterCacheRef.current[hrefKey] = record;
-      setHasCachedChapters(true);
-      await BookTranslationDB.saveBookCache(
-        currentBookIdRef.current,
-        targetLangRef.current,
-        currentBookTitleRef.current,
-        chapterCacheRef.current
-      );
+      if (currentBookIdRef.current === bookId && targetLangRef.current === lang) {
+        chapterCacheRef.current[hrefKey] = draftRecord;
+        setHasCachedChapters(true);
+        if (hrefMatches(currentSpineHrefRef.current, hrefKey)) {
+          syncActiveIframesForHref(hrefKey, draftRecord);
+        }
+        void BookTranslationDB.saveBookCache(bookId, lang, bookTitle, chapterCacheRef.current);
+      }
 
-      return record;
+      // Stage 2: Background AI Polish
+      const polishPromise = runBackgroundAiPolish(hrefKey, paragraphs, drafts, signal);
+      if (options?.waitForPolish) {
+        const polished = await polishPromise;
+        return polished || draftRecord;
+      }
+
+      void polishPromise;
+      return draftRecord;
     },
-    [extractSectionParagraphs]
+    [runBackgroundAiPolish, setStatusIfActiveHref, syncActiveIframesForHref]
   );
 
-  // Inject original, translated, or bilingual paragraphs into active EPUB iframe DOM
+  const translateAndCacheSection = useCallback(
+    async (
+      section: SpineSection,
+      options?: { waitForPolish?: boolean; signal?: AbortSignal }
+    ): Promise<ChapterTranslation | null> => {
+      if (!section?.href) return null;
+      const hrefKey = normalizeHref(section.href);
+      const existing = findCachedChapterInMemory(hrefKey);
+      if (existing && existing.pairs.length > 0) {
+        if (hrefMatches(currentSpineHrefRef.current, hrefKey)) {
+          syncActiveIframesForHref(hrefKey, existing);
+        }
+        if (existing.stage === 'draft') {
+          const polishPromise = runBackgroundAiPolish(
+            hrefKey,
+            existing.pairs.map((p) => p.orig),
+            existing.pairs.map((p) => p.trans),
+            options?.signal
+          );
+          if (options?.waitForPolish) {
+            const polished = await polishPromise;
+            return polished || existing;
+          }
+          void polishPromise;
+        } else {
+          setStatusIfActiveHref(hrefKey, 'polished');
+        }
+        return existing;
+      }
+
+      const paragraphs = await extractSectionParagraphs(section);
+      return translateParagraphsTwoStage(hrefKey, paragraphs, options);
+    },
+    [
+      extractSectionParagraphs,
+      findCachedChapterInMemory,
+      runBackgroundAiPolish,
+      setStatusIfActiveHref,
+      syncActiveIframesForHref,
+      translateParagraphsTwoStage,
+    ]
+  );
+
+  // Inject original, translated, or bilingual paragraphs into active EPUB iframe DOM(s)
   const applyReadingModeToCurrentView = useCallback(
-    async (hrefOverride?: string) => {
+    async (hrefOverride?: string, options?: { autoTranslateIfMissing?: boolean }) => {
       const rendition = renditionRef.current;
       if (!rendition) return;
-      const contentsList = rendition.getContents() as unknown as Array<{ document: Document }>;
+      const contentsList = (rendition.getContents() || []) as unknown as RenditionContentsItem[];
       if (!contentsList || contentsList.length === 0) return;
-
-      const activeHref = (hrefOverride || currentSpineHrefRef.current || '').split('#')[0];
-      const doc = contentsList[0].document;
-      if (!doc?.body) return;
-
-      const blocks = Array.from(
-        doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote')
-      ).filter((node) => {
-        const el = node as HTMLElement;
-        return (el.dataset.origText || el.innerText.trim()).length > 0;
-      }) as HTMLElement[];
-
-      blocks.forEach((node) => {
-        if (!node.dataset.origHtml) {
-          node.dataset.origHtml = node.innerHTML;
-          node.dataset.origText = node.innerText.trim();
-        }
-      });
 
       const mode = readingModeRef.current;
       if (mode === 'original') {
-        blocks.forEach((node) => {
-          if (node.dataset.origHtml) {
-            node.innerHTML = node.dataset.origHtml;
+        abortActiveChapterTranslation();
+        setChapterPolishStatus('idle');
+        contentsList.forEach((item) => {
+          if (item.document?.body) {
+            injectTranslationIntoDocument(item.document, 'original');
           }
         });
         return;
       }
 
-      let cachedChapter: ChapterTranslation | undefined = chapterCacheRef.current[activeHref];
-      if (!cachedChapter) {
-        const matchedKey = Object.keys(chapterCacheRef.current).find(
-          (k) => k.endsWith(activeHref) || activeHref.endsWith(k)
+      if (Object.keys(chapterCacheRef.current).length === 0 && currentBookIdRef.current) {
+        const dbCache = await BookTranslationDB.getBookCache(
+          currentBookIdRef.current,
+          targetLangRef.current
         );
-        if (matchedKey) cachedChapter = chapterCacheRef.current[matchedKey];
+        if (Object.keys(dbCache).length > 0) {
+          chapterCacheRef.current = dbCache;
+          setHasCachedChapters(true);
+        }
       }
 
-      if (!cachedChapter && activeHref && activeSectionTranslatingRef.current !== activeHref) {
-        const book = bookRef.current;
-        const section = book?.spine?.get(activeHref) as unknown as SpineSection | undefined;
-        if (section) {
+      for (const item of contentsList) {
+        const doc = item.document;
+        if (!doc?.body) continue;
+
+        const targetHref =
+          item.section?.href || hrefOverride || currentSpineHrefRef.current || '';
+        const cleanTargetHref = normalizeHref(targetHref);
+        if (!cleanTargetHref) continue;
+
+        let cachedChapter = findCachedChapterInMemory(cleanTargetHref);
+
+        if (cachedChapter && cachedChapter.pairs.length > 0) {
+          injectTranslationIntoDocument(doc, mode, cachedChapter);
+          if (cachedChapter.stage === 'draft') {
+            if (!chapterAbortControllerRef.current || chapterAbortControllerRef.current.signal.aborted) {
+              chapterAbortControllerRef.current = new AbortController();
+            }
+            void runBackgroundAiPolish(
+              cleanTargetHref,
+              cachedChapter.pairs.map((p) => p.orig),
+              cachedChapter.pairs.map((p) => p.trans),
+              chapterAbortControllerRef.current.signal
+            );
+          } else {
+            setStatusIfActiveHref(cleanTargetHref, 'polished');
+          }
+          continue;
+        }
+
+        if (
+          !cachedChapter &&
+          options?.autoTranslateIfMissing !== false &&
+          activeSectionTranslatingRef.current !== cleanTargetHref
+        ) {
+          abortActiveChapterTranslation();
+          const controller = new AbortController();
+          chapterAbortControllerRef.current = controller;
+
+          const book = bookRef.current;
+          const spineItems = ((book?.spine as unknown as { spineItems?: SpineSection[] })
+            ?.spineItems || []) as SpineSection[];
+          const section =
+            (book?.spine?.get(targetHref) as unknown as SpineSection | undefined) ||
+            spineItems.find((s) => hrefMatches(s.href, cleanTargetHref));
+
           try {
-            activeSectionTranslatingRef.current = activeHref;
-            setLoaderText(`Menerjemahkan bab ini ke ${targetLangRef.current}...`);
-            cachedChapter = (await translateAndCacheSection(section)) ?? undefined;
+            activeSectionTranslatingRef.current = cleanTargetHref;
+            if (section) {
+              cachedChapter =
+                (await translateAndCacheSection(section, { signal: controller.signal })) ??
+                undefined;
+            } else {
+              const blocks = captureOriginalBlocks(doc);
+              const paragraphs = blocks
+                .map((b) => normalizeBlockText(b.dataset.origText || b.textContent || ''))
+                .filter((t) => t.length > 0);
+              if (paragraphs.length > 0) {
+                cachedChapter = await translateParagraphsTwoStage(cleanTargetHref, paragraphs, {
+                  signal: controller.signal,
+                });
+              }
+            }
           } catch (err) {
-            const msg = err instanceof Error ? err.message : 'Gagal menerjemahkan bab otomatis.';
-            showToast(msg, 'error');
+            if ((err as { name?: string })?.name !== 'AbortError') {
+              const msg =
+                err instanceof Error ? err.message : 'Gagal menerjemahkan bab otomatis.';
+              showToast(msg, 'error');
+              setStatusIfActiveHref(cleanTargetHref, 'idle');
+            }
           } finally {
-            activeSectionTranslatingRef.current = null;
-            setLoaderText(null);
+            if (activeSectionTranslatingRef.current === cleanTargetHref) {
+              activeSectionTranslatingRef.current = null;
+            }
           }
         }
-      }
 
-      if (!cachedChapter || cachedChapter.pairs.length === 0) return;
-
-      const translationMap = new Map<string, string>();
-      cachedChapter.pairs.forEach((p) => {
-        translationMap.set(p.orig.replace(/\s+/g, ' ').trim(), p.trans);
-      });
-
-      blocks.forEach((node, idx) => {
-        const origText = (node.dataset.origText || '').replace(/\s+/g, ' ').trim();
-        const translatedText =
-          translationMap.get(origText) || cachedChapter?.pairs[idx]?.trans || null;
-        if (!translatedText) return;
-
-        if (mode === 'translated') {
-          node.textContent = translatedText;
-        } else if (mode === 'bilingual') {
-          node.innerHTML = `${node.dataset.origHtml}<span class="ai-bilingual-trans">${escapeHtml(
-            translatedText
-          )}</span>`;
+        if (
+          cachedChapter &&
+          cachedChapter.pairs.length > 0 &&
+          hrefMatches(currentSpineHrefRef.current, cleanTargetHref)
+        ) {
+          injectTranslationIntoDocument(doc, mode, cachedChapter);
         }
-      });
+      }
     },
-    [showToast, translateAndCacheSection]
+    [
+      abortActiveChapterTranslation,
+      findCachedChapterInMemory,
+      runBackgroundAiPolish,
+      setStatusIfActiveHref,
+      showToast,
+      translateAndCacheSection,
+      translateParagraphsTwoStage,
+    ]
   );
 
   const refreshLibraryList = useCallback(async () => {
@@ -461,15 +1119,19 @@ export default function App() {
       if (!viewerRef.current) return;
 
       try {
+        abortActiveChapterTranslation();
         if (batchControlRef.current.running) {
           batchControlRef.current.cancelled = true;
           batchControlRef.current.running = false;
         }
         setShowBatchBar(false);
+        setChapterPolishStatus('idle');
         setLoaderText('Memuat isi buku EPUB...');
         setPopoverPos(null);
+        scrollContainerBoundRef.current = null;
 
         if (bookRef.current) {
+          renditionRef.current = null;
           bookRef.current.destroy();
           bookRef.current = null;
         }
@@ -490,7 +1152,6 @@ export default function App() {
         setCurrentBookId(resolvedId);
         setCurrentBookTitle(resolvedTitle);
 
-        // Save to persistent IndexedDB library if requested
         if (options?.persist !== false) {
           const existing = await LibraryDB.getBook(resolvedId);
           await LibraryDB.saveBook({
@@ -507,25 +1168,16 @@ export default function App() {
           await refreshLibraryList();
         }
 
-        // Load cached translations
         const cached = await BookTranslationDB.getBookCache(resolvedId, targetLangRef.current);
         chapterCacheRef.current = cached;
         const cachedCount = Object.keys(cached).length;
-        const spineItems = ((book.spine as unknown as { spineItems?: SpineSection[] })?.spineItems ||
-          []) as SpineSection[];
         setHasCachedChapters(cachedCount > 0);
-        if (cachedCount > 0) {
-          showToast(
-            `Ditemukan ${cachedCount}/${spineItems.length} bab terjemahan tersimpan (${targetLangRef.current}).`,
-            'success'
-          );
-        }
 
         const rendition = book.renderTo(viewerRef.current, {
           width: '100%',
           height: '100%',
           spread: 'none',
-          flow: 'paginated',
+          flow: readerFlowRef.current === 'scroll' ? 'scrolled-doc' : 'paginated',
         });
         renditionRef.current = rendition;
         applyRenditionStyling();
@@ -539,10 +1191,16 @@ export default function App() {
           setCurrentChapterTitle(firstTitle);
         }
 
-        // Rendition events
         rendition.on('relocated', async (location: RenditionLocation) => {
           setPopoverPos(null);
           if (location?.start) {
+            const prevHref = normalizeHref(currentSpineHrefRef.current);
+            const nextHref = normalizeHref(location.start.href);
+            if (prevHref && nextHref && !hrefMatches(prevHref, nextHref)) {
+              abortActiveChapterTranslation();
+              setChapterPolishStatus('idle');
+            }
+
             currentCfiRef.current = location.start.cfi;
             currentSpineHrefRef.current = location.start.href;
             localStorage.setItem(`reader_pos_${currentBookIdRef.current}`, location.start.cfi);
@@ -562,8 +1220,7 @@ export default function App() {
               );
             }
 
-            const cleanHref = (location.start.href || '').split('#')[0];
-            const foundToc = tocList.find((item) => item.href && item.href.includes(cleanHref));
+            const foundToc = tocList.find((item) => hrefMatches(item.href, location.start?.href));
             if (foundToc) {
               const title = foundToc.label.trim();
               currentChapterTitleRef.current = title;
@@ -573,6 +1230,21 @@ export default function App() {
             await LibraryDB.updateProgress(currentBookIdRef.current, pct, location.start.cfi);
             await applyReadingModeToCurrentView(location.start.href);
           }
+        });
+
+        rendition.on('rendered', async (section: { href?: string }) => {
+          if (section?.href) {
+            currentSpineHrefRef.current = section.href;
+          }
+          const contentsList = (rendition.getContents() || []) as unknown as RenditionContentsItem[];
+          contentsList.forEach((c) => {
+            if (c.document?.body) {
+              syncScrollNavFooterInDoc(c.document, c.section?.href || section?.href);
+            }
+          });
+          await applyReadingModeToCurrentView(section?.href);
+          expandScrolledViews();
+          bindScrollAutoHide();
         });
 
         rendition.on('selected', (_cfiRange: string, contents: { window: Window }) => {
@@ -597,25 +1269,96 @@ export default function App() {
           }
         });
 
-        rendition.hooks.content.register((contents: { document: Document }) => {
+        rendition.hooks.content.register((contents: { document: Document; section?: { href?: string } }) => {
           const doc = contents.document;
-          const blocks = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote');
-          blocks.forEach((node) => {
-            const el = node as HTMLElement;
-            if (!el.dataset.origHtml && el.innerText.trim().length > 0) {
-              el.dataset.origHtml = el.innerHTML;
-              el.dataset.origText = el.innerText.trim();
+          captureOriginalBlocks(doc);
+
+          if (readingModeRef.current !== 'original') {
+            const cHref = contents.section?.href || currentSpineHrefRef.current || '';
+            const cachedRec = findCachedChapterInMemory(cHref);
+            if (cachedRec && cachedRec.pairs.length > 0) {
+              injectTranslationIntoDocument(doc, readingModeRef.current, cachedRec);
+            }
+          }
+
+          syncScrollNavFooterInDoc(doc, contents.section?.href);
+
+          doc.addEventListener('keydown', (e) => {
+            const target = e.target as HTMLElement | null;
+            const isTyping =
+              target &&
+              (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable);
+            if (isTyping || isAnyModalOpenRef.current) return;
+
+            if (e.key === 'ArrowLeft') {
+              e.preventDefault();
+              navigateReaderRef.current('prev');
+            } else if (e.key === 'ArrowRight') {
+              e.preventDefault();
+              navigateReaderRef.current('next');
+            } else if (e.key === 'ArrowUp' && readerFlowRef.current === 'scroll') {
+              e.preventDefault();
+              scrollReaderVerticalRef.current(-200);
+            } else if (e.key === 'ArrowDown' && readerFlowRef.current === 'scroll') {
+              e.preventDefault();
+              scrollReaderVerticalRef.current(200);
             }
           });
 
-          doc.addEventListener('keydown', (e) => {
-            if (e.key === 'ArrowLeft') rendition.prev();
-            if (e.key === 'ArrowRight') rendition.next();
+          // Toggle auto-hide chrome cleanly when reader taps/clicks prose inside EPUB iframe
+          let pointerDownPos: { x: number; y: number; time: number } | null = null;
+          doc.addEventListener('pointerdown', (e) => {
+            setPopoverPos(null);
+            pointerDownPos = { x: e.clientX, y: e.clientY, time: Date.now() };
           });
 
-          doc.addEventListener('mousedown', () => {
-            setPopoverPos(null);
+          doc.addEventListener('click', (e) => {
+            const target = e.target as HTMLElement | null;
+            if (target?.closest('a, button, input, select, textarea, [role="button"]')) return;
+            const sel = doc.getSelection()?.toString().trim();
+            if (sel) return;
+            if (pointerDownPos) {
+              const moved =
+                Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y) > 10;
+              const heldLong = Date.now() - pointerDownPos.time > 400;
+              if (moved || heldLong) return;
+            }
+            setSettingsOpen(false);
+            setChromeVisible((v) => !v);
           });
+
+          let touchStartX = 0;
+          let touchStartY = 0;
+          let touchStartTime = 0;
+          doc.addEventListener(
+            'touchstart',
+            (e) => {
+              if (e.touches.length !== 1) return;
+              touchStartX = e.touches[0].clientX;
+              touchStartY = e.touches[0].clientY;
+              touchStartTime = Date.now();
+            },
+            { passive: true }
+          );
+          doc.addEventListener(
+            'touchend',
+            (e) => {
+              if (e.changedTouches.length !== 1) return;
+              if (Date.now() - touchStartTime > 650) return;
+              const dx = e.changedTouches[0].clientX - touchStartX;
+              const dy = e.changedTouches[0].clientY - touchStartY;
+              const sel = doc.getSelection()?.toString().trim();
+              if (sel) return;
+              if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+                if (dx < 0) {
+                  rendition.next();
+                } else {
+                  rendition.prev();
+                }
+              }
+            },
+            { passive: true }
+          );
         });
 
         const savedCfi = localStorage.getItem(`reader_pos_${resolvedId}`);
@@ -640,7 +1383,17 @@ export default function App() {
         showToast('Gagal membaca file EPUB. Pastikan format file valid.', 'error');
       }
     },
-    [applyReadingModeToCurrentView, applyRenditionStyling, refreshLibraryList, showToast]
+    [
+      abortActiveChapterTranslation,
+      applyReadingModeToCurrentView,
+      applyRenditionStyling,
+      bindScrollAutoHide,
+      expandScrolledViews,
+      findCachedChapterInMemory,
+      refreshLibraryList,
+      showToast,
+      syncScrollNavFooterInDoc,
+    ]
   );
 
   // Initialize library and load last-opened book or built-in sample
@@ -679,51 +1432,61 @@ export default function App() {
 
     return () => {
       mounted = false;
+      abortActiveChapterTranslation();
+      renditionRef.current = null;
       if (bookRef.current) {
         bookRef.current.destroy();
+        bookRef.current = null;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Resize EPUB rendition cleanly
+  // Listen for File -> Open EPUB from macOS Electron menu bar
+  useEffect(() => {
+    const macDesktop = (
+      window as unknown as {
+        macDesktop?: {
+          onEpubOpenedFromMenu?: (
+            cb: (payload: { fileName: string; buffer: Uint8Array }) => void
+          ) => () => void;
+        };
+      }
+    ).macDesktop;
+
+    if (!macDesktop?.onEpubOpenedFromMenu) return;
+    return macDesktop.onEpubOpenedFromMenu(async ({ fileName, buffer }) => {
+      const cleanTitle = fileName.replace(/\.epub$/i, '');
+      const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+      await loadEpubBook(ab, { title: cleanTitle, persist: true });
+      showToast(`Berhasil membuka "${cleanTitle}"`, 'success');
+    });
+  }, [loadEpubBook, showToast]);
+
+  // Resize EPUB rendition cleanly & track mobile viewport width
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     const handleResize = () => {
+      setIsMobileViewport(window.innerWidth < 640);
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (renditionRef.current && viewerRef.current) {
-          renditionRef.current.resize(
-            viewerRef.current.clientWidth,
-            viewerRef.current.clientHeight
-          );
-        }
-      }, 180);
+      timer = setTimeout(safeResizeRendition, 180);
     };
     window.addEventListener('resize', handleResize);
     return () => {
       clearTimeout(timer);
       window.removeEventListener('resize', handleResize);
     };
-  }, []);
+  }, [safeResizeRendition]);
 
-  // Trigger resize when sidebars/drawers toggle on MacBook
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (renditionRef.current && viewerRef.current) {
-        renditionRef.current.resize(
-          viewerRef.current.clientWidth,
-          viewerRef.current.clientHeight
-        );
-      }
-    }, 220);
+    const timer = setTimeout(safeResizeRendition, 220);
     return () => clearTimeout(timer);
-  }, [sidebarDesktopOpen, drawerOpen, focusMode]);
+  }, [sidebarDesktopOpen, drawerOpen, safeResizeRendition]);
 
   // Contextual translation action
   const handleContextualTranslate = useCallback(
     async (text: string, isFullChapter: boolean) => {
-      const clean = text.trim();
+      const clean = sanitizeTextForTranslation(text);
       if (!clean) {
         showToast('Tidak ada teks yang dipilih untuk diterjemahkan.', 'error');
         return;
@@ -736,7 +1499,12 @@ export default function App() {
       setDrawerLoading(true);
 
       try {
-        const translation = await translateContextualApi(clean, targetLangRef.current, isFullChapter);
+        const translation = await translateContextualApi(
+          clean,
+          targetLangRef.current,
+          isFullChapter,
+          hasServerEnvKeyRef.current
+        );
         setDrawerResultText(translation);
       } catch (err) {
         setDrawerError(err instanceof Error ? err.message : 'Gagal terhubung ke layanan AI.');
@@ -747,26 +1515,27 @@ export default function App() {
     [showToast]
   );
 
-  // Extract visible page text
-  const getVisiblePageText = useCallback((): string => {
-    try {
-      const contentsList = renditionRef.current?.getContents() as unknown as Array<{
-        document: Document;
-      }>;
-      if (contentsList && contentsList.length > 0) {
-        const bodyText = contentsList[0].document.body?.innerText?.trim() || '';
-        return bodyText.slice(0, 3500);
-      }
-    } catch {
-      // ignore
+  // Translate active chapter/page directly in EPUB reader using Two-Stage Hybrid Translation
+  const handleTranslateCurrentPage = useCallback(async () => {
+    const contentsList = (renditionRef.current?.getContents() ||
+      []) as unknown as RenditionContentsItem[];
+    if (!contentsList || contentsList.length === 0) {
+      showToast('Konten halaman belum siap diterjemahkan.', 'error');
+      return;
     }
-    return '';
-  }, []);
+
+    if (readingModeRef.current === 'original') {
+      setReadingMode('translated');
+      readingModeRef.current = 'translated';
+    }
+
+    await applyReadingModeToCurrentView(undefined, { autoTranslateIfMissing: true });
+  }, [applyReadingModeToCurrentView, showToast]);
 
   // Save vocabulary item
   const handleSaveVocab = useCallback(
     async (rawWord: string) => {
-      const word = rawWord.trim();
+      const word = sanitizeTextForTranslation(rawWord);
       if (!word) return;
       const shortWord = word.length > 120 ? `${word.slice(0, 120)}...` : word;
 
@@ -778,9 +1547,13 @@ export default function App() {
       showToast('Menyimpan & mencari arti singkat...', 'info');
       let meaning = 'Tersimpan dari bacaan';
       try {
-        meaning = await translateVocabApi(shortWord, targetLangRef.current);
+        meaning = await translateVocabApi(
+          shortWord,
+          targetLangRef.current,
+          hasServerEnvKeyRef.current
+        );
       } catch {
-        // fallback when offline
+        // fallback silently
       }
 
       const item: VocabItem = {
@@ -833,7 +1606,7 @@ export default function App() {
     showToast('Halaman berhasil ditandai!', 'success');
   }, [bookmarks, showToast]);
 
-  // Handle EPUB File open (from input or drag-drop)
+  // Handle EPUB File open
   const handleOpenEpubFile = useCallback(
     async (file: File) => {
       if (!file.name.toLowerCase().endsWith('.epub')) {
@@ -853,12 +1626,19 @@ export default function App() {
     [loadEpubBook, showToast]
   );
 
-  // MacBook Keyboard Shortcuts
+  // MacBook / Desktop Keyboard Shortcuts & Arrow Navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      const isInput = target && ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName);
+      const isInput =
+        target &&
+        (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable);
 
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        setBookListOpen((v) => !v);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
         e.preventDefault();
         fileInputRef.current?.click();
@@ -876,16 +1656,12 @@ export default function App() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 't') {
         e.preventDefault();
-        const text = getVisiblePageText();
-        if (text) {
-          setSelectedText(text);
-          handleContextualTranslate(text, true);
-        }
+        handleTranslateCurrentPage();
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
         e.preventDefault();
-        setFocusMode((v) => !v);
+        setChromeVisible((v) => !v);
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key === '/') {
@@ -895,36 +1671,112 @@ export default function App() {
       }
       if (e.key === 'Escape') {
         setSettingsOpen(false);
+        setApiSettingsOpen(false);
         setShortcutsOpen(false);
-        setInstallModalOpen(false);
+        setBookListOpen(false);
         setPopoverPos(null);
-        if (focusMode) setFocusMode(false);
+        setChromeVisible(true);
         return;
       }
 
-      if (isInput) return;
-      if (e.key === 'ArrowLeft') renditionRef.current?.prev();
-      if (e.key === 'ArrowRight') renditionRef.current?.next();
+      if (isInput || apiSettingsOpen || bookListOpen || shortcutsOpen || settingsOpen) return;
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigateReader('prev');
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigateReader('next');
+      } else if (e.key === 'ArrowUp' && readerFlowRef.current === 'scroll') {
+        e.preventDefault();
+        scrollReaderVertical(-200);
+      } else if (e.key === 'ArrowDown' && readerFlowRef.current === 'scroll') {
+        e.preventDefault();
+        scrollReaderVertical(200);
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [focusMode, getVisiblePageText, handleAddBookmark, handleContextualTranslate]);
+  }, [
+    apiSettingsOpen,
+    bookListOpen,
+    handleAddBookmark,
+    handleTranslateCurrentPage,
+    navigateReader,
+    scrollReaderVertical,
+    settingsOpen,
+    shortcutsOpen,
+  ]);
+
+  // Switch Reading Layout Flow (Paginated vs Vertical Scroll)
+  const handleChangeReaderFlow = useCallback(
+    (nextFlow: ReaderFlow) => {
+      if (nextFlow === readerFlowRef.current) return;
+      setReaderFlow(nextFlow);
+      readerFlowRef.current = nextFlow;
+      localStorage.setItem('reader_flow', nextFlow);
+      scrollContainerBoundRef.current = null;
+
+      const rendition = renditionRef.current as
+        | (Rendition & { flow?: (f: string) => void })
+        | null;
+      if (rendition?.flow) {
+        try {
+          rendition.flow(nextFlow === 'scroll' ? 'scrolled-doc' : 'paginated');
+        } catch {
+          // ignore transient flow update errors
+        }
+      }
+
+      setTimeout(() => {
+        applyRenditionStyling();
+        const contentsList = (renditionRef.current?.getContents() ||
+          []) as unknown as RenditionContentsItem[];
+        contentsList.forEach((c) => {
+          if (c.document?.body) {
+            syncScrollNavFooterInDoc(c.document, c.section?.href);
+          }
+        });
+        expandScrolledViews();
+        bindScrollAutoHide();
+        safeResizeRendition();
+      }, 120);
+
+      showToast(
+        nextFlow === 'scroll'
+          ? 'Mode baca diubah ke Scroll Vertikal'
+          : 'Mode baca diubah ke Mode Halaman',
+        'info'
+      );
+    },
+    [
+      applyRenditionStyling,
+      bindScrollAutoHide,
+      expandScrolledViews,
+      safeResizeRendition,
+      showToast,
+      syncScrollNavFooterInDoc,
+    ]
+  );
 
   // Switch Reading Mode
   const handleChangeReadingMode = async (nextMode: ReadingMode) => {
     setReadingMode(nextMode);
     readingModeRef.current = nextMode;
     await applyReadingModeToCurrentView();
+    expandScrolledViews();
   };
 
   // Switch Target Language
   const handleChangeTargetLang = async (nextLang: string) => {
+    abortActiveChapterTranslation();
     setTargetLang(nextLang);
     targetLangRef.current = nextLang;
     const cached = await BookTranslationDB.getBookCache(currentBookIdRef.current, nextLang);
     chapterCacheRef.current = cached;
     setHasCachedChapters(Object.keys(cached).length > 0);
+    setChapterPolishStatus('idle');
     showToast(`Bahasa target diubah ke ${nextLang}`, 'info');
     if (readingModeRef.current !== 'original') {
       await applyReadingModeToCurrentView();
@@ -966,39 +1818,55 @@ export default function App() {
     });
 
     try {
-      for (let i = 0; i < spineItems.length; i++) {
-        if (batchControlRef.current.cancelled) break;
+      const activeHref = currentSpineHrefRef.current;
+      const orderedSections = [...spineItems].sort((a, b) => {
+        const aActive = hrefMatches(activeHref, a.href) ? 0 : 1;
+        const bActive = hrefMatches(activeHref, b.href) ? 0 : 1;
+        return aActive - bActive;
+      });
 
-        while (batchControlRef.current.paused && !batchControlRef.current.cancelled) {
-          await new Promise((r) => setTimeout(r, 250));
+      let completedCount = 0;
+      const CONCURRENCY = 2;
+      let cursor = 0;
+
+      const worker = async () => {
+        while (cursor < orderedSections.length && !batchControlRef.current.cancelled) {
+          while (batchControlRef.current.paused && !batchControlRef.current.cancelled) {
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          if (batchControlRef.current.cancelled) break;
+
+          const idx = cursor++;
+          const section = orderedSections[idx];
+          const isActiveChapter = hrefMatches(currentSpineHrefRef.current, section.href);
+          setBatchState((prev) => ({
+            ...prev,
+            statusText: `Menerjemahkan Bab ${Math.min(completedCount + 1, spineItems.length)} dari ${spineItems.length} (${targetLangRef.current})...`,
+          }));
+
+          await translateAndCacheSection(section, { waitForPolish: !isActiveChapter });
+
+          if (isActiveChapter) {
+            await applyReadingModeToCurrentView(section.href, { autoTranslateIfMissing: false });
+          }
+
+          completedCount += 1;
+          setBatchState((prev) => ({
+            ...prev,
+            completed: completedCount,
+          }));
         }
-        if (batchControlRef.current.cancelled) break;
+      };
 
-        const section = spineItems[i];
-        setBatchState((prev) => ({
-          ...prev,
-          completed: i,
-          statusText: `Menerjemahkan Bab ${i + 1} dari ${spineItems.length} (${targetLangRef.current})...`,
-        }));
-
-        await translateAndCacheSection(section);
-
-        const currentHrefClean = (currentSpineHrefRef.current || '').split('#')[0];
-        const sectionHrefClean = (section.href || '').split('#')[0];
-        if (
-          currentHrefClean &&
-          (currentHrefClean.endsWith(sectionHrefClean) || sectionHrefClean.endsWith(currentHrefClean))
-        ) {
-          await applyReadingModeToCurrentView(currentHrefClean);
-        }
-
-        setBatchState((prev) => ({
-          ...prev,
-          completed: i + 1,
-        }));
-      }
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, orderedSections.length) }, () => worker())
+      );
 
       if (!batchControlRef.current.cancelled) {
+        if ((readingModeRef.current as ReadingMode) === 'original') {
+          setReadingMode('translated');
+          readingModeRef.current = 'translated';
+        }
         setBatchState((prev) => ({
           ...prev,
           running: false,
@@ -1006,7 +1874,7 @@ export default function App() {
           statusText: `Selesai! Seluruh ${spineItems.length} bab diterjemahkan ke ${targetLangRef.current}.`,
         }));
         showToast('Seluruh buku berhasil diterjemahkan & disimpan luring!', 'success');
-        await applyReadingModeToCurrentView();
+        await applyReadingModeToCurrentView(undefined, { autoTranslateIfMissing: false });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gangguan jaringan saat menerjemahkan.';
@@ -1016,7 +1884,7 @@ export default function App() {
         error: true,
         statusText: `${msg} Progres yang selesai tetap tersimpan.`,
       }));
-      showToast('Penerjemahan terhenti sementara. Klik Terjemahkan Buku untuk melanjutkan.', 'error');
+      showToast('Penerjemahan terhenti sementara.', 'error');
     } finally {
       batchControlRef.current.running = false;
     }
@@ -1051,8 +1919,7 @@ export default function App() {
     let chaptersHtml = '';
 
     spineItems.forEach((sec, index) => {
-      const hrefClean = (sec.href || '').split('#')[0];
-      const cached = chapterCacheRef.current[hrefClean];
+      const cached = findCachedChapterInMemory(sec.href);
       if (!cached || cached.pairs.length === 0) return;
 
       const parasHtml = cached.pairs
@@ -1116,7 +1983,7 @@ export default function App() {
 
   return (
     <div
-      className="flex h-screen flex-col overflow-hidden select-none sm:select-auto"
+      className="relative flex h-[100dvh] flex-col overflow-hidden select-none sm:select-auto"
       onClick={() => setSettingsOpen(false)}
       onDragOver={(e) => {
         e.preventDefault();
@@ -1152,14 +2019,14 @@ export default function App() {
             <Upload className="mx-auto h-10 w-10 text-blue-600" />
             <p className="mt-3 text-base font-bold">Lepaskan file EPUB di sini</p>
             <p className="mt-1 text-xs text-[var(--text-secondary)]">
-              Buku akan dibuka dan disimpan otomatis ke Pustaka MacBook
+              Buku akan dibuka dan disimpan otomatis ke PustakaLoka
             </p>
           </div>
         </div>
       )}
 
       {/* Toast Container */}
-      <div className="pointer-events-none fixed bottom-20 right-4 z-50 flex flex-col gap-2">
+      <div className="pointer-events-none fixed bottom-20 right-3 z-50 flex flex-col gap-2 sm:bottom-16 sm:right-4">
         {toasts.map((t) => (
           <div
             key={t.id}
@@ -1176,191 +2043,166 @@ export default function App() {
         ))}
       </div>
 
-      {/* Offline Connectivity Banner */}
+      {/* Minimal Offline Indicator */}
       {!isOnline && (
-        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-lg">
-          <WifiOff className="h-3.5 w-3.5" />
-          Mode Luring — Buku & terjemahan tersimpan tetap dapat dibaca
+        <div className="fixed bottom-16 left-3 z-50 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-600 px-2.5 py-1 text-[11px] font-semibold text-white shadow-md sm:left-4">
+          <WifiOff className="h-3 w-3" />
+          <span>Mode Luring</span>
         </div>
       )}
 
-      {/* Top macOS Workspace Toolbar */}
-      {!focusMode && (
-        <header className="mac-surface z-30 flex h-14 shrink-0 items-center justify-between gap-3 border-b px-3 sm:px-5">
-          {/* Left: Sidebar Toggle & Book Identity */}
-          <div className="flex min-w-0 items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => {
-                if (window.innerWidth < 1024) {
-                  setSidebarMobileOpen((v) => !v);
-                } else {
-                  setSidebarDesktopOpen((v) => !v);
-                }
-              }}
-              title="Pustaka & Daftar Isi (⌘\)"
-              className="flex items-center gap-1.5 rounded-xl p-2 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap shrink-0"
-            >
-              <PanelLeft className="h-4 w-4" />
-              <span className="hidden md:inline">Pustaka</span>
-            </button>
-
-            <div className="hidden h-5 w-px bg-[var(--border-color)] sm:block" />
-
-            <div className="flex min-w-0 items-center gap-2.5">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white">
-                <BookOpen className="h-4 w-4" />
-              </div>
-              <div className="min-w-0">
-                <h1 className="truncate text-xs font-bold leading-tight sm:text-sm">
-                  {currentBookTitle}
-                </h1>
-                <p className="truncate text-[11px] text-[var(--text-secondary)]">
-                  {currentChapterTitle}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Center: Reading Mode Segmented Control */}
-          <div
-            className="hidden items-center rounded-xl border border-[var(--border-color)] bg-slate-500/5 p-0.5 text-xs font-semibold xl:flex shrink-0"
-            title="Mode Tampilan Teks Buku"
-          >
-            {(
-              [
-                { id: 'original', label: 'Asli' },
-                { id: 'translated', label: 'Terjemahan' },
-                { id: 'bilingual', label: 'Bilingual' },
-              ] as const
-            ).map((mode) => (
-              <button
-                key={mode.id}
-                type="button"
-                onClick={() => handleChangeReadingMode(mode.id)}
-                className={`rounded-lg px-3 py-1.5 whitespace-nowrap transition ${
-                  readingMode === mode.id
-                    ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                }`}
-              >
-                {mode.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Right: Actions */}
-          <div className="flex shrink-0 items-center gap-1.5">
-            <div className="mac-surface hidden items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs lg:flex">
-              <Languages className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
-              <select
-                value={targetLang}
-                onChange={(e) => handleChangeTargetLang(e.target.value)}
-                aria-label="Bahasa Target Terjemahan"
-                className="cursor-pointer bg-transparent font-semibold focus:outline-none"
-              >
-                {TARGET_LANGUAGES.map((lang) => (
-                  <option key={lang.value} value={lang.value} className="text-slate-900">
-                    {lang.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <button
-              type="button"
-              onClick={startFullBookTranslation}
-              title="Terjemahkan Seluruh Bab Buku"
-              className="flex items-center gap-1.5 rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-700 whitespace-nowrap shrink-0"
-            >
-              <BookA className="h-3.5 w-3.5" />
-              <span className="hidden md:inline">Terjemahkan Buku</span>
-              <span className="md:hidden">Semua</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const text = getVisiblePageText();
-                if (!text) {
-                  showToast('Konten halaman belum siap diterjemahkan.', 'error');
-                  return;
-                }
-                setSelectedText(text);
-                handleContextualTranslate(text, true);
-              }}
-              title="Terjemahkan Halaman Aktif (⌘T)"
-              className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap shrink-0"
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Halaman Ini</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleAddBookmark}
-              title="Tandai Halaman Ini (⌘D)"
-              className="mac-surface rounded-xl border p-2 transition hover:bg-slate-500/10"
-            >
-              <Bookmark className="h-4 w-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setSettingsOpen((v) => !v);
-              }}
-              title="Pengaturan Tampilan & Mode Baca"
-              className="mac-surface rounded-xl border p-2 transition hover:bg-slate-500/10"
-            >
-              <TypeIcon className="h-4 w-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setFocusMode(true)}
-              title="Mode Fokus Baca (⌘F)"
-              className="mac-surface hidden rounded-xl border p-2 transition hover:bg-slate-500/10 sm:inline-flex"
-            >
-              <Maximize2 className="h-4 w-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              title="Unggah EPUB (⌘O)"
-              className="mac-surface flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap shrink-0"
-            >
-              <Upload className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
-              <span className="hidden md:inline">Unggah EPUB</span>
-            </button>
-
-            {!isInstalled && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (isInstallable) {
-                    install();
-                  } else {
-                    setInstallModalOpen(true);
-                  }
-                }}
-                title="Pasang ke Dock MacBook"
-                className="mac-surface hidden items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap shrink-0 xl:flex"
-              >
-                <Laptop className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
-                <span>Pasang di Mac</span>
-              </button>
-            )}
-          </div>
-        </header>
+      {/* Hover Reveal Strip at Top Edge on Desktop when auto-hidden */}
+      {!effectiveChromeVisible && (
+        <div
+          onMouseEnter={() => setChromeVisible(true)}
+          onClick={() => setChromeVisible(true)}
+          className="fixed inset-x-0 top-0 z-30 h-5 cursor-pointer"
+          aria-hidden="true"
+        />
       )}
 
+      {/* Floating Minimalist Auto-Hide Top Bar */}
+      <header
+        className={`mac-surface fixed inset-x-0 top-0 z-30 flex h-12 items-center justify-between gap-2 border-b backdrop-blur-md transition-all duration-200 sm:gap-3 ${
+          isElectron ? 'mac-drag-region pl-20 pr-4' : 'px-2.5 sm:px-5'
+        } ${
+          effectiveChromeVisible
+            ? 'translate-y-0 opacity-100'
+            : '-translate-y-full pointer-events-none opacity-0'
+        }`}
+        style={{ backgroundColor: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)' }}
+      >
+        {/* Left: Sidebar, Book List, Book & Chapter Title */}
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (window.innerWidth < 1024) {
+                setSidebarMobileOpen((v) => !v);
+              } else {
+                setSidebarDesktopOpen((v) => !v);
+              }
+            }}
+            title="Daftar Isi & Pustaka (⌘\)"
+            aria-label="Daftar Isi & Pustaka"
+            className="mac-no-drag flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 shrink-0 sm:min-h-[36px] sm:min-w-[36px]"
+          >
+            <PanelLeft className="h-4 w-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBookListOpen(true)}
+            title="Book List (⌘L)"
+            className="mac-no-drag flex min-h-[40px] items-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap shrink-0 sm:min-h-[36px]"
+          >
+            <Library className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+            <span className="hidden sm:inline">Book List</span>
+          </button>
+
+          <div className="hidden h-4 w-px bg-[var(--border-color)] sm:block" />
+
+          <div className="min-w-0">
+            <h1 className="truncate text-xs font-bold leading-tight sm:text-sm">
+              {currentBookTitle}
+            </h1>
+            <p className="hidden truncate text-[11px] text-[var(--text-secondary)] sm:block">
+              {currentChapterTitle}
+            </p>
+          </div>
+        </div>
+
+        {/* Center: Clean Reading Mode Switch */}
+        <div className="mac-no-drag hidden items-center rounded-xl border border-[var(--border-color)] bg-slate-500/5 p-0.5 text-xs font-semibold md:flex shrink-0">
+          {(
+            [
+              { id: 'original', label: 'Asli' },
+              { id: 'translated', label: 'Terjemahan' },
+              { id: 'bilingual', label: 'Bilingual' },
+            ] as const
+          ).map((mode) => (
+            <button
+              key={mode.id}
+              type="button"
+              onClick={() => handleChangeReadingMode(mode.id)}
+              className={`rounded-lg px-2.5 py-1 whitespace-nowrap transition ${
+                readingMode === mode.id
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Right: Essential Reader Actions */}
+        <div className="mac-no-drag flex shrink-0 items-center gap-1 sm:gap-1.5">
+          <button
+            type="button"
+            onClick={handleTranslateCurrentPage}
+            title="Terjemahkan Bab Aktif (⌘T)"
+            className="hidden items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap shrink-0 sm:flex"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            <span>Terjemahkan</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleAddBookmark}
+            title="Tandai Halaman Ini (⌘D)"
+            aria-label="Tandai Halaman Ini"
+            className="hidden min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:inline-flex"
+          >
+            <Bookmark className="h-4 w-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setSettingsOpen((v) => !v);
+            }}
+            title="Tipografi & Mode Baca"
+            aria-label="Tipografi & Mode Baca"
+            className={`flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px] ${
+              settingsOpen ? 'bg-blue-600/12 text-blue-600 dark:text-blue-400' : ''
+            }`}
+          >
+            <TypeIcon className="h-4 w-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setSettingsOpen(false);
+              setApiSettingsOpen(true);
+            }}
+            title="Pengaturan Gemini API & Model AI"
+            aria-label="Pengaturan Gemini API & Model AI"
+            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 transition hover:bg-slate-500/10 sm:min-h-[36px] sm:min-w-[36px]"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Unggah File EPUB (⌘O)"
+            aria-label="Unggah File EPUB"
+            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl p-2 text-blue-600 transition hover:bg-blue-500/10 dark:text-blue-400 sm:min-h-[36px] sm:min-w-[36px]"
+          >
+            <Upload className="h-4 w-4" />
+          </button>
+        </div>
+      </header>
+
       {/* Full-Book Batch Translation Progress Bar */}
-      {!focusMode && showBatchBar && (
-        <div className="mac-surface z-20 border-b px-4 py-2.5">
-          <div className="mx-auto flex max-w-6xl flex-col justify-between gap-2.5 sm:flex-row sm:items-center">
+      {showBatchBar && (
+        <div className="mac-surface fixed inset-x-0 top-12 z-20 border-b px-4 py-2.5 shadow-md">
+          <div className="mx-auto flex max-w-5xl flex-col justify-between gap-2.5 sm:flex-row sm:items-center">
             <div className="min-w-0 flex-1 space-y-1.5">
               <div className="flex items-center justify-between gap-2 text-xs">
                 <div className="flex min-w-0 items-center gap-2">
@@ -1409,7 +2251,7 @@ export default function App() {
                   className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 whitespace-nowrap"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  <span>Unduh Terjemahan</span>
+                  <span>Unduh HTML</span>
                 </button>
               )}
 
@@ -1426,12 +2268,14 @@ export default function App() {
         </div>
       )}
 
-      {/* Settings Popover */}
+      {/* Appearance & Typography Popover */}
       <SettingsPopover
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         readingMode={readingMode}
         onChangeReadingMode={handleChangeReadingMode}
+        readerFlow={readerFlow}
+        onChangeReaderFlow={handleChangeReaderFlow}
         theme={theme}
         onChangeTheme={setTheme}
         fontFamily={fontFamily}
@@ -1440,6 +2284,12 @@ export default function App() {
         onChangeFontSize={setFontSize}
         lineHeight={lineHeight}
         onChangeLineHeight={setLineHeight}
+        paragraphSpacing={paragraphSpacing}
+        onChangeParagraphSpacing={setParagraphSpacing}
+        contentWidth={contentWidth}
+        onChangeContentWidth={setContentWidth}
+        textAlign={textAlign}
+        onChangeTextAlign={setTextAlign}
         targetLang={targetLang}
         onChangeTargetLang={handleChangeTargetLang}
         onTranslateFullBook={startFullBookTranslation}
@@ -1447,239 +2297,160 @@ export default function App() {
 
       {/* Main Workspace */}
       <div className="relative flex flex-1 overflow-hidden">
-        {!focusMode && (
-          <Sidebar
-            openDesktop={sidebarDesktopOpen}
-            openMobile={sidebarMobileOpen}
-            onCloseMobile={() => setSidebarMobileOpen(false)}
-            activeTab={sidebarTab}
-            onChangeTab={setSidebarTab}
-            libraryBooks={libraryBooks}
-            currentBookId={currentBookId}
-            onSelectLibraryBook={async (bookId) => {
-              const rec = await LibraryDB.getBook(bookId);
-              if (rec) {
-                await loadEpubBook(rec.data, {
-                  bookId: rec.id,
-                  title: rec.title,
-                  author: rec.author,
-                  isSample: rec.isSample,
-                  persist: true,
-                });
-              }
-            }}
-            onDeleteLibraryBook={async (bookId) => {
-              await LibraryDB.deleteBook(bookId);
-              await refreshLibraryList();
-              showToast('Buku dihapus dari Pustaka MacBook.', 'info');
-            }}
-            onTriggerUpload={() => fileInputRef.current?.click()}
-            onLoadSampleBook={async () => {
-              const sampleBuffer = await createSampleEpubBuffer();
-              await loadEpubBook(sampleBuffer, {
-                bookId: SAMPLE_BOOK_ID,
-                title: 'The Art of Quiet Reading (Buku Contoh)',
-                author: 'Eleanor Vance',
-                isSample: true,
+        <Sidebar
+          openDesktop={sidebarDesktopOpen}
+          openMobile={sidebarMobileOpen}
+          onCloseMobile={() => setSidebarMobileOpen(false)}
+          activeTab={sidebarTab}
+          onChangeTab={setSidebarTab}
+          libraryBooks={libraryBooks}
+          currentBookId={currentBookId}
+          onSelectLibraryBook={async (bookId) => {
+            const rec = await LibraryDB.getBook(bookId);
+            if (rec) {
+              await loadEpubBook(rec.data, {
+                bookId: rec.id,
+                title: rec.title,
+                author: rec.author,
+                isSample: rec.isSample,
                 persist: true,
               });
-              showToast('Buku contoh bawaan dimuat.', 'info');
-            }}
-            toc={toc}
-            onSelectTocHref={(href) => renditionRef.current?.display(href)}
-            bookmarks={bookmarks}
-            onSelectBookmark={(cfi) => renditionRef.current?.display(cfi)}
-            onDeleteBookmark={(id) => {
-              const next = bookmarks.filter((b) => b.id !== id);
-              setBookmarks(next);
-              localStorage.setItem('reader_bookmarks', JSON.stringify(next));
-              showToast('Penanda dihapus.', 'info');
-            }}
-            vocabList={vocabList}
-            onDeleteVocab={(id) => {
-              const next = vocabList.filter((v) => v.id !== id);
-              setVocabList(next);
-              localStorage.setItem('reader_vocab', JSON.stringify(next));
-            }}
-            onOpenShortcuts={() => setShortcutsOpen(true)}
-          />
-        )}
+            }
+          }}
+          onDeleteLibraryBook={async (bookId) => {
+            await LibraryDB.deleteBook(bookId);
+            await refreshLibraryList();
+            showToast('Buku dihapus dari PustakaLoka.', 'info');
+          }}
+          isElectron={isElectron}
+          onTriggerUpload={() => fileInputRef.current?.click()}
+          onLoadSampleBook={async () => {
+            const sampleBuffer = await createSampleEpubBuffer();
+            await loadEpubBook(sampleBuffer, {
+              bookId: SAMPLE_BOOK_ID,
+              title: 'The Art of Quiet Reading (Buku Contoh)',
+              author: 'Eleanor Vance',
+              isSample: true,
+              persist: true,
+            });
+            showToast('Buku contoh bawaan dimuat.', 'info');
+          }}
+          toc={toc}
+          onSelectTocHref={(href) => renditionRef.current?.display(href)}
+          bookmarks={bookmarks}
+          onSelectBookmark={(cfi) => renditionRef.current?.display(cfi)}
+          onDeleteBookmark={(id) => {
+            const next = bookmarks.filter((b) => b.id !== id);
+            setBookmarks(next);
+            localStorage.setItem('reader_bookmarks', JSON.stringify(next));
+            showToast('Penanda dihapus.', 'info');
+          }}
+          vocabList={vocabList}
+          onDeleteVocab={(id) => {
+            const next = vocabList.filter((v) => v.id !== id);
+            setVocabList(next);
+            localStorage.setItem('reader_vocab', JSON.stringify(next));
+          }}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
+        />
 
-        {/* Center Reader + Right AI Drawer */}
+        {/* Center Reader Stage + Right AI Drawer */}
         <main className="relative flex min-w-0 flex-1 flex-col lg:flex-row">
-          <div className="relative flex min-w-0 flex-1 flex-col">
-            {/* Compact Mode Switcher for Narrower Screens */}
-            {!focusMode && (
-              <div className="flex items-center justify-between gap-2 border-b border-[var(--border-color)] px-4 py-1.5 text-xs xl:hidden">
-                <div className="flex items-center gap-1 rounded-lg bg-slate-500/10 p-0.5 font-semibold">
-                  {(
-                    [
-                      { id: 'original', label: 'Asli' },
-                      { id: 'translated', label: 'Terjemahan' },
-                      { id: 'bilingual', label: 'Bilingual' },
-                    ] as const
-                  ).map((mode) => (
-                    <button
-                      key={mode.id}
-                      type="button"
-                      onClick={() => handleChangeReadingMode(mode.id)}
-                      className={`rounded-md px-2.5 py-1 whitespace-nowrap ${
-                        readingMode === mode.id
-                          ? 'bg-blue-600 text-white'
-                          : 'text-[var(--text-secondary)]'
-                      }`}
-                    >
-                      {mode.label}
-                    </button>
-                  ))}
-                </div>
+          <div className="relative flex min-w-0 flex-1 flex-col items-center justify-center overflow-hidden">
+            {loaderText && (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-app)]/90 backdrop-blur-xs">
+                <div className="h-9 w-9 animate-spin rounded-full border-3 border-blue-600 border-t-transparent" />
+                <p className="text-sm font-semibold">{loaderText}</p>
+              </div>
+            )}
 
-                {hasCachedChapters && (
+            <div
+              id="epub-viewer"
+              ref={viewerRef}
+              className={`mac-reader-stage relative h-full w-full overflow-hidden transition-[max-width] duration-200 ${
+                readerFlow === 'paginated' ? CONTENT_WIDTH_CLASS[contentWidth] : 'max-w-none'
+              }`}
+            />
+
+            {/* Unobtrusive Two-Stage Hybrid Translation Status */}
+            {readingMode !== 'original' && chapterPolishStatus !== 'idle' && (
+              <div
+                aria-live="polite"
+                className={`fixed right-4 z-20 flex items-center gap-1.5 text-[11px] font-semibold transition-all duration-200 ${
+                  chapterPolishStatus === 'draft-only' ? 'pointer-events-auto' : 'pointer-events-none'
+                } ${
+                  effectiveChromeVisible ? 'bottom-14 sm:bottom-14' : 'bottom-3'
+                } ${
+                  chapterPolishStatus === 'polished'
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : chapterPolishStatus === 'polishing' || chapterPolishStatus === 'drafting'
+                    ? 'text-blue-600 dark:text-blue-400'
+                    : 'text-[var(--text-secondary)]'
+                }`}
+              >
+                {(chapterPolishStatus === 'drafting' || chapterPolishStatus === 'polishing') && (
+                  <span className="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" />
+                )}
+                {chapterPolishStatus === 'drafting' && <span>Draf Instan...</span>}
+                {chapterPolishStatus === 'polishing' && <span>Draf Instan · Memperhalus AI...</span>}
+                {chapterPolishStatus === 'polished' && <span>AI Polished ✨</span>}
+                {chapterPolishStatus === 'draft-only' && (
                   <button
                     type="button"
-                    onClick={downloadTranslatedBookHtml}
-                    className="flex items-center gap-1 font-semibold text-emerald-600 hover:underline dark:text-emerald-400 whitespace-nowrap"
+                    title={polishFallbackReason || 'Draf Terjemahan Instan · Ketuk untuk Pengaturan AI'}
+                    onClick={() => {
+                      if (polishFallbackReason) {
+                        showToast(polishFallbackReason, 'info');
+                      } else {
+                        setApiSettingsOpen(true);
+                      }
+                    }}
+                    className="rounded-md px-1.5 py-0.5 transition hover:bg-slate-500/10"
                   >
-                    <Download className="h-3.5 w-3.5" />
-                    Unduh
+                    Terjemahan Instan
                   </button>
                 )}
               </div>
             )}
 
-            {/* Focus Mode Exit Pill-free Button */}
-            {focusMode && (
-              <button
-                type="button"
-                onClick={() => setFocusMode(false)}
-                title="Keluar dari Mode Fokus (Esc)"
-                className="mac-surface fixed right-4 top-4 z-40 flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold shadow-md transition hover:bg-slate-500/10"
-              >
-                <Minimize2 className="h-3.5 w-3.5" />
-                <span>Keluar Fokus</span>
-              </button>
-            )}
-
-            {/* Reader Stage */}
-            <div className="relative flex flex-1 items-center justify-center overflow-hidden p-3 sm:p-5">
-              {loaderText && (
-                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-app)]/85 backdrop-blur-xs">
-                  <div className="h-9 w-9 animate-spin rounded-full border-3 border-blue-600 border-t-transparent" />
-                  <p className="text-sm font-semibold">{loaderText}</p>
-                </div>
-              )}
-
+            {/* Floating Selection Popover */}
+            {popoverPos && (
               <div
-                id="epub-viewer"
-                ref={viewerRef}
-                className="mac-reader-stage relative h-full w-full max-w-4xl overflow-hidden rounded-2xl border shadow-xs"
-              />
-
-              {/* Floating Selection Popover */}
-              {popoverPos && (
-                <div
-                  style={{ left: `${popoverPos.x}px`, top: `${popoverPos.y}px` }}
-                  className="mac-surface fixed z-50 flex -translate-x-1/2 items-center gap-1 rounded-2xl border p-1.5 shadow-2xl"
+                style={{ left: `${popoverPos.x}px`, top: `${popoverPos.y}px` }}
+                className="mac-surface fixed z-50 flex -translate-x-1/2 items-center gap-1 rounded-2xl border p-1.5 shadow-2xl"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPopoverPos(null);
+                    handleContextualTranslate(selectedText, false);
+                  }}
+                  className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap"
                 >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPopoverPos(null);
-                      handleContextualTranslate(selectedText, false);
-                    }}
-                    className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap"
-                  >
-                    <Languages className="h-3.5 w-3.5" />
-                    Terjemahkan
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPopoverPos(null);
-                      handleSaveVocab(selectedText);
-                    }}
-                    className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap"
-                  >
-                    <BookmarkPlus className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                    Simpan Kosakata
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPopoverPos(null)}
-                    aria-label="Tutup Menu"
-                    className="rounded-xl p-1.5 text-[var(--text-secondary)] hover:bg-slate-500/10"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Bottom Progress & Navigation */}
-            <footer className="mac-surface shrink-0 border-t px-4 py-2.5">
-              <div className="mx-auto flex max-w-4xl flex-col gap-2">
-                <div className="flex items-center gap-3">
-                  <span className="font-mono-mac w-10 text-right text-xs font-semibold tabular-nums text-[var(--text-secondary)]">
-                    {progressPct}%
-                  </span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={progressPct}
-                    onChange={(e) => {
-                      if (!bookRef.current || !locationsReady) return;
-                      const pct = parseInt(e.target.value, 10) / 100;
-                      const cfi = bookRef.current.locations.cfiFromPercentage(pct);
-                      if (cfi) renditionRef.current?.display(cfi);
-                    }}
-                    aria-label="Progres Membaca"
-                    className="h-1.5 flex-1 cursor-pointer rounded-lg accent-blue-600"
-                  />
-                  <span className="font-mono-mac hidden text-xs tabular-nums text-[var(--text-secondary)] sm:inline">
-                    {pageLocationLabel}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => renditionRef.current?.prev()}
-                    className="mac-surface flex items-center gap-1.5 rounded-xl border px-3.5 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap"
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                    Sebelumnya
-                  </button>
-
-                  <div className="hidden items-center gap-2 text-xs text-[var(--text-secondary)] md:flex">
-                    <span>Navigasi cepat:</span>
-                    <kbd className="font-mono-mac rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px]">
-                      ←
-                    </kbd>
-                    <kbd className="font-mono-mac rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px]">
-                      →
-                    </kbd>
-                    <span aria-hidden="true">·</span>
-                    <button
-                      type="button"
-                      onClick={() => setShortcutsOpen(true)}
-                      className="hover:underline"
-                    >
-                      Pintasan ⌘/
-                    </button>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => renditionRef.current?.next()}
-                    className="mac-surface flex items-center gap-1.5 rounded-xl border px-3.5 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap"
-                  >
-                    Selanjutnya
-                    <ChevronRight className="h-4 w-4" />
-                  </button>
-                </div>
+                  <Languages className="h-3.5 w-3.5" />
+                  Terjemahkan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPopoverPos(null);
+                    handleSaveVocab(selectedText);
+                  }}
+                  className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap"
+                >
+                  <BookmarkPlus className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                  Simpan Kosakata
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPopoverPos(null)}
+                  aria-label="Tutup Menu"
+                  className="rounded-xl p-1.5 text-[var(--text-secondary)] hover:bg-slate-500/10"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               </div>
-            </footer>
+            )}
           </div>
 
           <TranslationDrawer
@@ -1706,17 +2477,141 @@ export default function App() {
         </main>
       </div>
 
+      {/* Hover Reveal Strip at Bottom Edge on Desktop when auto-hidden */}
+      {!effectiveChromeVisible && (
+        <div
+          onMouseEnter={() => setChromeVisible(true)}
+          onClick={() => setChromeVisible(true)}
+          className="fixed inset-x-0 bottom-0 z-30 h-5 cursor-pointer"
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Floating Minimalist Auto-Hide Bottom Bar */}
+      <footer
+        className={`mac-surface fixed inset-x-0 bottom-0 z-30 border-t px-3 pb-[max(0.4rem,env(safe-area-inset-bottom))] pt-1.5 backdrop-blur-md transition-all duration-200 sm:px-5 sm:py-2 ${
+          effectiveChromeVisible
+            ? 'translate-y-0 opacity-100'
+            : 'translate-y-full pointer-events-none opacity-0'
+        }`}
+        style={{ backgroundColor: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)' }}
+      >
+        <div className="mx-auto flex max-w-4xl items-center gap-2.5 sm:gap-4">
+          <button
+            type="button"
+            onClick={() => navigateReader('prev')}
+            title={readerFlow === 'scroll' ? 'Bab Sebelumnya (←)' : 'Halaman Sebelumnya (←)'}
+            aria-label={readerFlow === 'scroll' ? 'Bab Sebelumnya' : 'Halaman Sebelumnya'}
+            className="flex min-h-[40px] min-w-[40px] items-center justify-center gap-1 rounded-xl border border-[var(--border-color)] px-2 text-xs font-semibold transition hover:bg-slate-500/10 active:scale-95 whitespace-nowrap sm:min-h-[34px] sm:px-3"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            <span className="hidden sm:inline">
+              {readerFlow === 'scroll' ? 'Bab Sebelumnya' : 'Sebelumnya'}
+            </span>
+          </button>
+
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+            <span className="font-mono-mac w-8 text-right text-[11px] font-semibold tabular-nums text-[var(--text-secondary)]">
+              {progressPct}%
+            </span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={progressPct}
+              onChange={(e) => {
+                if (!bookRef.current || !locationsReady) return;
+                const pct = parseInt(e.target.value, 10) / 100;
+                const cfi = bookRef.current.locations.cfiFromPercentage(pct);
+                if (cfi) renditionRef.current?.display(cfi);
+              }}
+              aria-label="Progres Membaca"
+              className="h-1.5 flex-1 cursor-pointer rounded-lg accent-blue-600"
+            />
+            <span className="font-mono-mac hidden shrink-0 text-[11px] tabular-nums text-[var(--text-secondary)] sm:inline">
+              {pageLocationLabel}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleTranslateCurrentPage}
+            aria-label="Terjemahkan Bab"
+            className="flex min-h-[40px] items-center justify-center gap-1 rounded-xl bg-blue-600 px-2.5 text-xs font-semibold text-white transition active:scale-95 sm:hidden"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigateReader('next')}
+            title={readerFlow === 'scroll' ? 'Bab Berikutnya (→)' : 'Halaman Selanjutnya (→)'}
+            aria-label={readerFlow === 'scroll' ? 'Bab Berikutnya' : 'Halaman Selanjutnya'}
+            className="flex min-h-[40px] min-w-[40px] items-center justify-center gap-1 rounded-xl border border-[var(--border-color)] px-2 text-xs font-semibold transition hover:bg-slate-500/10 active:scale-95 whitespace-nowrap sm:min-h-[34px] sm:px-3"
+          >
+            <span className="hidden sm:inline">
+              {readerFlow === 'scroll' ? 'Bab Berikutnya' : 'Selanjutnya'}
+            </span>
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      </footer>
+
       {/* Modals */}
-      <PWAInstallModal
-        open={installModalOpen}
-        onClose={() => setInstallModalOpen(false)}
-        isInstallable={isInstallable}
-        isSafariMac={isSafariMac}
-        isIOS={isIOS}
-        onInstallClick={install}
+      <BookListModal
+        open={bookListOpen}
+        onClose={() => setBookListOpen(false)}
+        books={libraryBooks}
+        currentBookId={currentBookId}
+        onSelectBook={async (bookId) => {
+          const rec = await LibraryDB.getBook(bookId);
+          if (rec) {
+            await loadEpubBook(rec.data, {
+              bookId: rec.id,
+              title: rec.title,
+              author: rec.author,
+              isSample: rec.isSample,
+              persist: true,
+            });
+          }
+        }}
+        onDeleteBook={async (bookId) => {
+          await LibraryDB.deleteBook(bookId);
+          await refreshLibraryList();
+          showToast('Buku dihapus dari Book List.', 'info');
+        }}
+        onTriggerUpload={() => fileInputRef.current?.click()}
+        onLoadSampleBook={async () => {
+          const sampleBuffer = await createSampleEpubBuffer();
+          await loadEpubBook(sampleBuffer, {
+            bookId: SAMPLE_BOOK_ID,
+            title: 'The Art of Quiet Reading (Buku Contoh)',
+            author: 'Eleanor Vance',
+            isSample: true,
+            persist: true,
+          });
+          showToast('Buku contoh bawaan dimuat.', 'info');
+        }}
       />
 
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+
+      <ApiSettingsModal
+        open={apiSettingsOpen}
+        hasServerEnvKey={hasServerEnvKey}
+        onClose={() => setApiSettingsOpen(false)}
+        onSaved={({ activeModel, usingUserKey }) => {
+          showToast(
+            `Pengaturan AI disimpan (${activeModel} · ${
+              usingUserKey ? 'Client API Key' : hasServerEnvKey ? 'Server Default' : 'Draf Instan'
+            }).`,
+            'success'
+          );
+          if (readingModeRef.current !== 'original') {
+            void applyReadingModeToCurrentView(undefined, { autoTranslateIfMissing: false });
+          }
+        }}
+      />
     </div>
   );
 }

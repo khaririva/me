@@ -1,6 +1,9 @@
 export type ReaderTheme = 'light' | 'sepia' | 'dark';
 export type ReaderFont = 'serif' | 'sans';
 export type ReadingMode = 'original' | 'translated' | 'bilingual';
+export type ReaderFlow = 'paginated' | 'scroll';
+export type ReaderContentWidth = 'narrow' | 'medium' | 'wide';
+export type ReaderTextAlign = 'left' | 'justify';
 export type SidebarTab = 'library' | 'toc' | 'bookmarks' | 'vocab';
 
 export interface TranslationPair {
@@ -8,9 +11,12 @@ export interface TranslationPair {
   trans: string;
 }
 
+export type TranslationStage = 'draft' | 'polished';
+
 export interface ChapterTranslation {
   href: string;
   pairs: TranslationPair[];
+  stage?: TranslationStage;
   updatedAt: number;
 }
 

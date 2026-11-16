@@ -63,8 +63,9 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
   if (!open) return null;
 
   return (
-    <section className="mac-surface fixed inset-x-0 bottom-0 z-40 flex max-h-[75vh] flex-col rounded-t-2xl border-t shadow-2xl lg:static lg:inset-auto lg:max-h-none lg:w-[25rem] xl:w-[28rem] lg:rounded-none lg:border-l lg:border-t-0 lg:shadow-none">
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--border-color)] px-4 py-3.5">
+    <section className="mac-surface fixed inset-x-0 bottom-0 z-40 flex max-h-[78dvh] flex-col rounded-t-3xl border-t pb-[env(safe-area-inset-bottom)] shadow-2xl lg:static lg:inset-auto lg:max-h-none lg:w-[25rem] xl:w-[28rem] lg:rounded-none lg:border-l lg:border-t-0 lg:pb-0 lg:shadow-none">
+      <div className="mx-auto mt-2.5 h-1.5 w-10 shrink-0 rounded-full bg-slate-300 dark:bg-slate-700 lg:hidden" />
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border-color)] px-4 py-3">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-600/12 text-blue-600 dark:text-blue-400">
             <Languages className="h-4 w-4" />
@@ -80,7 +81,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
             onClick={onCopy}
             disabled={!resultText || loading}
             title="Salin Terjemahan"
-            className="rounded-lg p-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10 disabled:opacity-40"
+            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg p-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10 disabled:opacity-40"
           >
             <Copy className="h-4 w-4" />
           </button>
@@ -88,7 +89,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
             type="button"
             onClick={onClose}
             title="Tutup Panel"
-            className="rounded-lg p-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10"
+            className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg p-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10"
           >
             <X className="h-4 w-4" />
           </button>
