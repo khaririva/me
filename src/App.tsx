@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import ePub, { type Book, type Rendition } from 'epubjs';
 import {
   Bookmark,
@@ -494,6 +496,19 @@ export default function App() {
     }
   }, [theme]);
 
+  // Configure Capacitor Android StatusBar edge-to-edge overlay & icon contrast
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
+    void StatusBar.setOverlaysWebView({ overlay: true }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
+    void StatusBar.setStyle({
+      style: theme === 'dark' ? Style.Dark : Style.Light,
+    }).catch(() => {});
+  }, [theme]);
+
   // Apply complete typography & comfort styles inside EPUB iframe
   const applyRenditionStyling = useCallback(() => {
     localStorage.setItem('reader_font', fontFamily);
@@ -648,6 +663,31 @@ export default function App() {
     const timer = setTimeout(safeResizeRendition, 120);
     return () => clearTimeout(timer);
   }, [contentWidth, safeResizeRendition]);
+
+  // Sync Android Status Bar visibility with auto-hide toolbar & fullscreen state
+  const shouldHideAndroidStatusBar = !effectiveChromeVisible || isFullscreen;
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return;
+    let cancelled = false;
+    const syncStatusBar = async () => {
+      try {
+        if (shouldHideAndroidStatusBar) {
+          await StatusBar.hide();
+        } else {
+          await StatusBar.show();
+        }
+        if (!cancelled) {
+          setTimeout(safeResizeRendition, 140);
+        }
+      } catch {
+        // ignore outside native Android runtime
+      }
+    };
+    void syncStatusBar();
+    return () => {
+      cancelled = true;
+    };
+  }, [safeResizeRendition, shouldHideAndroidStatusBar]);
 
   const expandScrolledViews = useCallback(() => {
     if (readerFlowRef.current !== 'scroll') return;
@@ -1429,11 +1469,21 @@ export default function App() {
             'touchend',
             (e) => {
               if (e.changedTouches.length !== 1) return;
-              if (Date.now() - touchStartTime > 650) return;
               const dx = e.changedTouches[0].clientX - touchStartX;
               const dy = e.changedTouches[0].clientY - touchStartY;
               const sel = doc.getSelection()?.toString().trim();
               if (sel) return;
+
+              if (readerFlowRef.current === 'scroll' && Math.abs(dy) > 32 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+                if (dy < -32) {
+                  setChromeVisible(false);
+                } else if (dy > 36) {
+                  setChromeVisible(true);
+                }
+                return;
+              }
+
+              if (Date.now() - touchStartTime > 650) return;
               if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
                 if (dx < 0) {
                   rendition.next();
@@ -1444,6 +1494,28 @@ export default function App() {
             },
             { passive: true }
           );
+
+          const iframeWin = doc.defaultView;
+          if (iframeWin) {
+            let lastIframeScrollY = iframeWin.scrollY || 0;
+            iframeWin.addEventListener(
+              'scroll',
+              () => {
+                if (readerFlowRef.current !== 'scroll') return;
+                const sy = iframeWin.scrollY || 0;
+                const delta = sy - lastIframeScrollY;
+                lastIframeScrollY = sy;
+                if (sy <= 16) {
+                  setChromeVisible(true);
+                } else if (delta > 18 && sy > 56) {
+                  setChromeVisible(false);
+                } else if (delta < -28) {
+                  setChromeVisible(true);
+                }
+              },
+              { passive: true }
+            );
+          }
         });
 
         const savedCfi = localStorage.getItem(`reader_pos_${resolvedId}`);

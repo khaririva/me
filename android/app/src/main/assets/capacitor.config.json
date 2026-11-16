@@ -9,5 +9,10 @@
 		"allowMixedContent": false,
 		"captureInput": true,
 		"webContentsDebuggingEnabled": false
+	},
+	"plugins": {
+		"StatusBar": {
+			"overlaysWebView": true
+		}
 	}
 }

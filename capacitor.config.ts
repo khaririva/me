@@ -12,6 +12,11 @@ const config: CapacitorConfig = {
     captureInput: true,
     webContentsDebuggingEnabled: false,
   },
+  plugins: {
+    StatusBar: {
+      overlaysWebView: true,
+    },
+  },
 };
 
 export default config;
