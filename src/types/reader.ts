@@ -49,6 +49,10 @@ export interface BookmarkItem {
   bookTitle: string;
   chapterTitle: string;
   cfi: string;
+  href?: string;
+  progressPct?: number;
+  scrollRatio?: number;
+  excerpt?: string;
   createdAt: string;
 }
 

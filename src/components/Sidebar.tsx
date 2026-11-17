@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookMarked, BookOpen, Keyboard, Trash2, Upload, X } from 'lucide-react';
+import { BookMarked, BookOpen, Keyboard, Plus, Trash2, Upload, X } from 'lucide-react';
 import type { BookmarkItem, LibraryBookMeta, SidebarTab, TocNode, VocabItem } from '../types/reader';
 
 interface SidebarProps {
@@ -17,11 +17,13 @@ interface SidebarProps {
   toc: TocNode[];
   onSelectTocHref: (href: string, label?: string) => void;
   bookmarks: BookmarkItem[];
-  onSelectBookmark: (cfi: string) => void;
+  onAddBookmark: () => void;
+  onSelectBookmark: (bookmark: BookmarkItem) => void;
   onDeleteBookmark: (id: string) => void;
   vocabList: VocabItem[];
   onDeleteVocab: (id: string) => void;
   onOpenShortcuts: () => void;
+  hideKeyboardShortcuts?: boolean;
   isElectron?: boolean;
   isFullscreen?: boolean;
   headerVisible?: boolean;
@@ -42,16 +44,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
   toc,
   onSelectTocHref,
   bookmarks,
+  onAddBookmark,
   onSelectBookmark,
   onDeleteBookmark,
   vocabList,
   onDeleteVocab,
   onOpenShortcuts,
+  hideKeyboardShortcuts = false,
   isElectron,
   isFullscreen = false,
   headerVisible = true,
 }) => {
   const currentBookBookmarks = bookmarks.filter((b) => b.bookId === currentBookId);
+  const isTouchOrSmallScreen =
+    hideKeyboardShortcuts ||
+    (typeof window !== 'undefined' && (window.innerWidth < 768 || 'ontouchstart' in window));
 
   const renderTocItems = (items: TocNode[], depth = 0): React.ReactNode => {
     return items.map((item, idx) => (
@@ -234,6 +241,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           {activeTab === 'bookmarks' && (
             <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={onAddBookmark}
+                className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-700 active:scale-[0.99]"
+              >
+                <Plus className="h-4 w-4" />
+                <span>Tambah Penanda</span>
+              </button>
+
               <div className="flex items-center justify-between px-1 text-xs font-semibold text-[var(--text-secondary)]">
                 <span>Halaman Ditandai</span>
                 <span className="font-mono-mac tabular-nums">{currentBookBookmarks.length}</span>
@@ -241,7 +257,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
               {currentBookBookmarks.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]">
-                  Belum ada halaman ditandai. Tekan ⌘D atau ikon penanda.
+                  Belum ada penanda tersimpan. Ketuk tombol &ldquo;+ Tambah Penanda&rdquo; di atas untuk menandai posisi baca saat ini.
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -253,15 +269,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          onSelectBookmark(bm.cfi);
+                          onSelectBookmark(bm);
                           onCloseMobile();
                         }}
                         className="min-w-0 flex-1 text-left"
                       >
-                        <div className="truncate text-xs font-semibold text-blue-600 dark:text-blue-400">
-                          {bm.chapterTitle}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-xs font-semibold text-blue-600 dark:text-blue-400">
+                            {bm.chapterTitle}
+                          </span>
+                          {typeof bm.progressPct === 'number' && (
+                            <span className="font-mono-mac shrink-0 rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-blue-600 dark:text-blue-400">
+                              {bm.progressPct}%
+                            </span>
+                          )}
                         </div>
-                        <div className="mt-0.5 text-[11px] text-[var(--text-secondary)] tabular-nums">
+                        {bm.excerpt && (
+                          <p className="mt-1 line-clamp-2 text-[11px] leading-snug italic text-[var(--text-primary)]/80">
+                            &ldquo;{bm.excerpt}&rdquo;
+                          </p>
+                        )}
+                        <div className="mt-1 text-[11px] text-[var(--text-secondary)] tabular-nums">
                           {bm.createdAt}
                         </div>
                       </button>
@@ -321,20 +349,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
 
-        {/* Minimal Sidebar Footer */}
-        <div className="border-t border-[var(--border-color)] p-2.5 text-xs">
-          <button
-            type="button"
-            onClick={onOpenShortcuts}
-            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10 hover:text-[var(--text-primary)]"
-          >
-            <span className="flex items-center gap-2 font-medium">
-              <Keyboard className="h-3.5 w-3.5" />
-              Pintasan Keyboard
-            </span>
-            <kbd className="font-mono-mac text-[11px]">⌘/</kbd>
-          </button>
-        </div>
+        {/* Minimal Sidebar Footer (Desktop non-touch only) */}
+        {!isTouchOrSmallScreen && (
+          <div className="hidden border-t border-[var(--border-color)] p-2.5 text-xs md:block">
+            <button
+              type="button"
+              onClick={onOpenShortcuts}
+              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[var(--text-secondary)] transition hover:bg-slate-500/10 hover:text-[var(--text-primary)]"
+            >
+              <span className="flex items-center gap-2 font-medium">
+                <Keyboard className="h-3.5 w-3.5" />
+                Pintasan Keyboard
+              </span>
+              <kbd className="font-mono-mac text-[11px]">⌘/</kbd>
+            </button>
+          </div>
+        )}
       </aside>
     </>
   );

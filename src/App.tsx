@@ -356,6 +356,9 @@ export default function App() {
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 640 : false
   );
+  const [isTouchOrMobileDevice, setIsTouchOrMobileDevice] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 || 'ontouchstart' in window : false
+  );
 
   // Mutable Refs for EPUB.js, AbortControllers & Async Loops
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -367,6 +370,7 @@ export default function App() {
   const currentChapterTitleRef = useRef<string>(currentChapterTitle);
   const currentCfiRef = useRef<string | null>(null);
   const currentSpineHrefRef = useRef<string | null>(null);
+  const progressPctRef = useRef<number>(progressPct);
   const locationsReadyRef = useRef<boolean>(false);
   const readingModeRef = useRef<ReadingMode>(readingMode);
   const readerFlowRef = useRef<ReaderFlow>(readerFlow);
@@ -406,6 +410,10 @@ export default function App() {
   useEffect(() => {
     chromeVisibleRef.current = chromeVisible;
   }, [chromeVisible]);
+
+  useEffect(() => {
+    progressPctRef.current = progressPct;
+  }, [progressPct]);
 
   useEffect(() => {
     isAnyModalOpenRef.current = Boolean(
@@ -1570,7 +1578,10 @@ export default function App() {
           doc.addEventListener(
             'touchstart',
             (e) => {
-              if (e.touches.length !== 1) return;
+              if (e.touches.length !== 1) {
+                touchStartTime = 0;
+                return;
+              }
               touchStartX = e.touches[0].clientX;
               touchStartY = e.touches[0].clientY;
               touchStartTime = Date.now();
@@ -1580,19 +1591,25 @@ export default function App() {
           doc.addEventListener(
             'touchend',
             (e) => {
-              if (e.changedTouches.length !== 1) return;
+              if (!touchStartTime || e.changedTouches.length !== 1) return;
               const dx = e.changedTouches[0].clientX - touchStartX;
               const dy = e.changedTouches[0].clientY - touchStartY;
+              const elapsed = Date.now() - touchStartTime;
+              touchStartTime = 0;
               const sel = doc.getSelection()?.toString().trim();
               if (sel) return;
 
-              if (readerFlowRef.current === 'scroll' && dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-                setChromeVisibleGuarded(false);
+              // In Vertical Scroll mode, horizontal chapter swipe is completely disabled to avoid accidental jumps
+              if (readerFlowRef.current === 'scroll') {
+                if (dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.4) {
+                  setChromeVisibleGuarded(false);
+                }
                 return;
               }
 
-              if (Date.now() - touchStartTime > 650) return;
-              if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+              // Paginated mode only: require strict horizontal swipe threshold
+              if (elapsed > 650) return;
+              if (Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(dy) * 2) {
                 if (dx < 0) {
                   rendition.next();
                 } else {
@@ -1738,6 +1755,8 @@ export default function App() {
     const handleResize = () => {
       const nextIsMobile = window.innerWidth < 640;
       setIsMobileViewport((prev) => (prev === nextIsMobile ? prev : nextIsMobile));
+      const nextTouchOrMobile = window.innerWidth < 768 || 'ontouchstart' in window;
+      setIsTouchOrMobileDevice((prev) => (prev === nextTouchOrMobile ? prev : nextTouchOrMobile));
       if (Date.now() < immersiveTransitionUntilRef.current) return;
       clearTimeout(timer);
       timer = setTimeout(() => safeResizeRendition(false), 200);
@@ -1843,17 +1862,71 @@ export default function App() {
     [showToast, vocabList]
   );
 
-  // Add current bookmark
+  // Add current bookmark (captures chapter title, percentage, scroll ratio, and visible excerpt)
   const handleAddBookmark = useCallback(() => {
-    const cfi = currentCfiRef.current;
-    if (!cfi) {
+    const rendition = renditionRef.current;
+    const liveLocation = (rendition?.currentLocation() || null) as RenditionLocation | null;
+    const cfi = liveLocation?.start?.cfi || currentCfiRef.current;
+    const href = liveLocation?.start?.href || currentSpineHrefRef.current || undefined;
+
+    if (!cfi && !href) {
       showToast('Tunggu hingga halaman selesai dimuat.', 'info');
       return;
     }
 
-    const exists = bookmarks.some((b) => b.bookId === currentBookIdRef.current && b.cfi === cfi);
+    let pct = progressPctRef.current;
+    if (cfi && locationsReadyRef.current && bookRef.current?.locations) {
+      const computedPct = Math.round(bookRef.current.locations.percentageFromCfi(cfi) * 100);
+      if (Number.isFinite(computedPct)) {
+        pct = Math.max(0, Math.min(100, computedPct));
+      }
+    }
+
+    let scrollRatio: number | undefined;
+    if (readerFlowRef.current === 'scroll') {
+      const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+      if (container) {
+        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        scrollRatio = maxScroll > 0 ? Math.min(1, Math.max(0, container.scrollTop / maxScroll)) : 0;
+      }
+    }
+
+    let excerpt = '';
+    try {
+      const contentsList = (rendition?.getContents() || []) as unknown as RenditionContentsItem[];
+      const activeContent =
+        contentsList.find((c) => c.section?.href && href && hrefMatches(c.section.href, href)) ||
+        contentsList[0];
+      const doc = activeContent?.document;
+      if (doc?.body) {
+        const blocks = getTranslatableBlocks(doc);
+        const viewportH = activeContent.window?.innerHeight || window.innerHeight || 700;
+        const visibleBlock =
+          blocks.find((el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.bottom > 12 && rect.top < viewportH;
+          }) || blocks[0];
+        const rawText = normalizeBlockText(
+          visibleBlock?.textContent || visibleBlock?.dataset?.origText || ''
+        );
+        if (rawText) {
+          excerpt = rawText.length > 78 ? `${rawText.slice(0, 75).trimEnd()}…` : rawText;
+        }
+      }
+    } catch {
+      // ignore excerpt extraction failures
+    }
+
+    const resolvedCfi = cfi || href || '';
+    const exists = bookmarks.some((b) => {
+      if (b.bookId !== currentBookIdRef.current || b.cfi !== resolvedCfi) return false;
+      if (typeof scrollRatio === 'number' && typeof b.scrollRatio === 'number') {
+        return Math.abs(b.scrollRatio - scrollRatio) < 0.02;
+      }
+      return (b.progressPct ?? pct) === pct;
+    });
     if (exists) {
-      showToast('Halaman ini sudah ada di daftar penanda.', 'info');
+      showToast('Posisi halaman ini sudah ada di daftar penanda.', 'info');
       return;
     }
 
@@ -1862,7 +1935,11 @@ export default function App() {
       bookId: currentBookIdRef.current,
       bookTitle: currentBookTitleRef.current,
       chapterTitle: currentChapterTitleRef.current,
-      cfi,
+      cfi: resolvedCfi,
+      href,
+      progressPct: pct,
+      scrollRatio,
+      excerpt: excerpt || undefined,
       createdAt: new Date().toLocaleDateString('id-ID', {
         day: 'numeric',
         month: 'short',
@@ -1874,8 +1951,38 @@ export default function App() {
     const next = [newBookmark, ...bookmarks];
     setBookmarks(next);
     localStorage.setItem('reader_bookmarks', JSON.stringify(next));
-    showToast('Halaman berhasil ditandai!', 'success');
+    showToast('Penanda berhasil ditambahkan!', 'success');
   }, [bookmarks, showToast]);
+
+  const handleSelectBookmark = useCallback(async (bm: BookmarkItem) => {
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+    const target = bm.cfi || bm.href;
+    if (!target) return;
+
+    try {
+      await rendition.display(target);
+    } catch {
+      if (bm.href && bm.href !== target) {
+        try {
+          await rendition.display(bm.href);
+        } catch {
+          // ignore unresolvable fallback
+        }
+      }
+    }
+
+    if (readerFlowRef.current === 'scroll' && typeof bm.scrollRatio === 'number' && bm.scrollRatio > 0.01) {
+      setTimeout(() => {
+        const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+        if (!container) return;
+        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        if (maxScroll > 0 && container.scrollTop <= 16) {
+          container.scrollTo({ top: Math.round(maxScroll * bm.scrollRatio!), behavior: 'auto' });
+        }
+      }, 120);
+    }
+  }, []);
 
   // Handle EPUB File open
   const handleOpenEpubFile = useCallback(
@@ -2023,7 +2130,9 @@ export default function App() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault();
-        setShortcutsOpen((v) => !v);
+        if (!isTouchOrMobileDevice) {
+          setShortcutsOpen((v) => !v);
+        }
         return;
       }
       if (e.key === 'Escape') {
@@ -2055,6 +2164,7 @@ export default function App() {
     handleAddBookmark,
     handleEscapeKey,
     handleTranslateCurrentPage,
+    isTouchOrMobileDevice,
     navigateReader,
     scrollReaderVertical,
     settingsOpen,
@@ -2678,9 +2788,8 @@ export default function App() {
           toc={toc}
           onSelectTocHref={handleSelectTocHref}
           bookmarks={bookmarks}
-          onSelectBookmark={(cfi) => {
-            void renditionRef.current?.display(cfi).catch(() => {});
-          }}
+          onAddBookmark={handleAddBookmark}
+          onSelectBookmark={handleSelectBookmark}
           onDeleteBookmark={(id) => {
             const next = bookmarks.filter((b) => b.id !== id);
             setBookmarks(next);
@@ -2693,7 +2802,10 @@ export default function App() {
             setVocabList(next);
             localStorage.setItem('reader_vocab', JSON.stringify(next));
           }}
-          onOpenShortcuts={() => setShortcutsOpen(true)}
+          onOpenShortcuts={() => {
+            if (!isTouchOrMobileDevice) setShortcutsOpen(true);
+          }}
+          hideKeyboardShortcuts={isTouchOrMobileDevice}
         />
 
         {/* Center Reader Stage + Right AI Drawer */}

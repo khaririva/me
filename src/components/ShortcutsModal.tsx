@@ -18,11 +18,13 @@ const SHORTCUTS = [
 ];
 
 export const ShortcutsModal: React.FC<ShortcutsModalProps> = ({ open, onClose }) => {
-  if (!open) return null;
+  const isTouchOrMobile =
+    typeof window !== 'undefined' && (window.innerWidth < 768 || 'ontouchstart' in window);
+  if (!open || isTouchOrMobile) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 hidden items-center justify-center bg-black/45 p-4 backdrop-blur-xs md:flex"
       onClick={onClose}
     >
       <div

@@ -37121,6 +37121,19 @@ var Play = createLucideIcon("play", [["path", {
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
+var Plus = createLucideIcon("plus", [["path", {
+	d: "M5 12h14",
+	key: "1ays0h"
+}], ["path", {
+	d: "M12 5v14",
+	key: "s699le"
+}]]);
+/**
+* @license lucide-react v0.546.0 - ISC
+*
+* This source code is licensed under the ISC license.
+* See the LICENSE file in the root directory of this source tree.
+*/
 var RotateCcw = createLucideIcon("rotate-ccw", [["path", {
 	d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8",
 	key: "1357e3"
@@ -38036,9 +38049,10 @@ var SHORTCUTS = [
 	}
 ];
 var ShortcutsModal = ({ open, onClose }) => {
-	if (!open) return null;
+	const isTouchOrMobile = typeof window !== "undefined" && (window.innerWidth < 768 || "ontouchstart" in window);
+	if (!open || isTouchOrMobile) return null;
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-		className: "fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-xs",
+		className: "fixed inset-0 z-50 hidden items-center justify-center bg-black/45 p-4 backdrop-blur-xs md:flex",
 		onClick: onClose,
 		children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 			className: "mac-surface w-full max-w-md rounded-2xl border p-6 shadow-2xl",
@@ -38087,8 +38101,9 @@ var ShortcutsModal = ({ open, onClose }) => {
 	});
 };
 // src/components/Sidebar.tsx
-var Sidebar = ({ openDesktop, openMobile, onCloseMobile, activeTab, onChangeTab, libraryBooks, currentBookId, onSelectLibraryBook, onDeleteLibraryBook, onTriggerUpload, onLoadSampleBook, toc, onSelectTocHref, bookmarks, onSelectBookmark, onDeleteBookmark, vocabList, onDeleteVocab, onOpenShortcuts, isElectron, isFullscreen = false, headerVisible = true }) => {
+var Sidebar = ({ openDesktop, openMobile, onCloseMobile, activeTab, onChangeTab, libraryBooks, currentBookId, onSelectLibraryBook, onDeleteLibraryBook, onTriggerUpload, onLoadSampleBook, toc, onSelectTocHref, bookmarks, onAddBookmark, onSelectBookmark, onDeleteBookmark, vocabList, onDeleteVocab, onOpenShortcuts, hideKeyboardShortcuts = false, isElectron, isFullscreen = false, headerVisible = true }) => {
 	const currentBookBookmarks = bookmarks.filter((b) => b.bookId === currentBookId);
+	const isTouchOrSmallScreen = hideKeyboardShortcuts || typeof window !== "undefined" && (window.innerWidth < 768 || "ontouchstart" in window);
 	const renderTocItems = (items, depth = 0) => {
 		return items.map((item, idx) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_react.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("li", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 			type: "button",
@@ -38238,42 +38253,68 @@ var Sidebar = ({ openDesktop, openMobile, onCloseMobile, activeTab, onChangeTab,
 					}),
 					activeTab === "bookmarks" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 						className: "space-y-2.5",
-						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-							className: "flex items-center justify-between px-1 text-xs font-semibold text-[var(--text-secondary)]",
-							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Halaman Ditandai" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-								className: "font-mono-mac tabular-nums",
-								children: currentBookBookmarks.length
-							})]
-						}), currentBookBookmarks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-							className: "rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]",
-							children: "Belum ada halaman ditandai. Tekan ⌘D atau ikon penanda."
-						}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-							className: "space-y-2",
-							children: currentBookBookmarks.map((bm) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "mac-surface flex items-start justify-between gap-2 rounded-xl border p-3 transition hover:border-blue-500/50",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
-									type: "button",
-									onClick: () => {
-										onSelectBookmark(bm.cfi);
-										onCloseMobile();
-									},
-									className: "min-w-0 flex-1 text-left",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "truncate text-xs font-semibold text-blue-600 dark:text-blue-400",
-										children: bm.chapterTitle
-									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "mt-0.5 text-[11px] text-[var(--text-secondary)] tabular-nums",
-										children: bm.createdAt
-									})]
-								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									type: "button",
-									onClick: () => onDeleteBookmark(bm.id),
-									title: "Hapus Penanda",
-									className: "rounded-lg p-1.5 text-rose-500 opacity-70 transition hover:bg-rose-500/10 hover:opacity-100",
-									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Trash2, { className: "h-3.5 w-3.5" })
+						children: [
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+								type: "button",
+								onClick: onAddBookmark,
+								className: "flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-700 active:scale-[0.99]",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Plus, { className: "h-4 w-4" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Tambah Penanda" })]
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center justify-between px-1 text-xs font-semibold text-[var(--text-secondary)]",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Halaman Ditandai" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+									className: "font-mono-mac tabular-nums",
+									children: currentBookBookmarks.length
 								})]
-							}, bm.id))
-						})]
+							}),
+							currentBookBookmarks.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]",
+								children: "Belum ada penanda tersimpan. Ketuk tombol “+ Tambah Penanda” di atas untuk menandai posisi baca saat ini."
+							}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "space-y-2",
+								children: currentBookBookmarks.map((bm) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "mac-surface flex items-start justify-between gap-2 rounded-xl border p-3 transition hover:border-blue-500/50",
+									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+										type: "button",
+										onClick: () => {
+											onSelectBookmark(bm);
+											onCloseMobile();
+										},
+										className: "min-w-0 flex-1 text-left",
+										children: [
+											/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+												className: "flex items-center justify-between gap-2",
+												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+													className: "truncate text-xs font-semibold text-blue-600 dark:text-blue-400",
+													children: bm.chapterTitle
+												}), typeof bm.progressPct === "number" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+													className: "font-mono-mac shrink-0 rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-blue-600 dark:text-blue-400",
+													children: [bm.progressPct, "%"]
+												})]
+											}),
+											bm.excerpt && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", {
+												className: "mt-1 line-clamp-2 text-[11px] leading-snug italic text-[var(--text-primary)]/80",
+												children: [
+													"“",
+													bm.excerpt,
+													"”"
+												]
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+												className: "mt-1 text-[11px] text-[var(--text-secondary)] tabular-nums",
+												children: bm.createdAt
+											})
+										]
+									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+										type: "button",
+										onClick: () => onDeleteBookmark(bm.id),
+										title: "Hapus Penanda",
+										className: "rounded-lg p-1.5 text-rose-500 opacity-70 transition hover:bg-rose-500/10 hover:opacity-100",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Trash2, { className: "h-3.5 w-3.5" })
+									})]
+								}, bm.id))
+							})
+						]
 					}),
 					activeTab === "vocab" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 						className: "space-y-2.5",
@@ -38324,8 +38365,8 @@ var Sidebar = ({ openDesktop, openMobile, onCloseMobile, activeTab, onChangeTab,
 					})
 				]
 			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "border-t border-[var(--border-color)] p-2.5 text-xs",
+			!isTouchOrSmallScreen && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+				className: "hidden border-t border-[var(--border-color)] p-2.5 text-xs md:block",
 				children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 					type: "button",
 					onClick: onOpenShortcuts,
@@ -42583,6 +42624,7 @@ function App() {
 	const isOnline = useOnlineStatus();
 	const [isFullscreen, setIsFullscreen] = (0, import_react.useState)(() => typeof document !== "undefined" ? Boolean(document.fullscreenElement) : false);
 	const [isMobileViewport, setIsMobileViewport] = (0, import_react.useState)(() => typeof window !== "undefined" ? window.innerWidth < 640 : false);
+	const [isTouchOrMobileDevice, setIsTouchOrMobileDevice] = (0, import_react.useState)(() => typeof window !== "undefined" ? window.innerWidth < 768 || "ontouchstart" in window : false);
 	const viewerRef = (0, import_react.useRef)(null);
 	const fileInputRef = (0, import_react.useRef)(null);
 	const bookRef = (0, import_react.useRef)(null);
@@ -42592,6 +42634,7 @@ function App() {
 	const currentChapterTitleRef = (0, import_react.useRef)(currentChapterTitle);
 	const currentCfiRef = (0, import_react.useRef)(null);
 	const currentSpineHrefRef = (0, import_react.useRef)(null);
+	const progressPctRef = (0, import_react.useRef)(progressPct);
 	const locationsReadyRef = (0, import_react.useRef)(false);
 	const readingModeRef = (0, import_react.useRef)(readingMode);
 	const readerFlowRef = (0, import_react.useRef)(readerFlow);
@@ -42633,6 +42676,9 @@ function App() {
 	(0, import_react.useEffect)(() => {
 		chromeVisibleRef.current = chromeVisible;
 	}, [chromeVisible]);
+	(0, import_react.useEffect)(() => {
+		progressPctRef.current = progressPct;
+	}, [progressPct]);
 	(0, import_react.useEffect)(() => {
 		isAnyModalOpenRef.current = Boolean(apiSettingsOpen || shortcutsOpen || settingsOpen);
 	}, [
@@ -43466,22 +43512,27 @@ function App() {
 				let touchStartY = 0;
 				let touchStartTime = 0;
 				doc.addEventListener("touchstart", (e) => {
-					if (e.touches.length !== 1) return;
+					if (e.touches.length !== 1) {
+						touchStartTime = 0;
+						return;
+					}
 					touchStartX = e.touches[0].clientX;
 					touchStartY = e.touches[0].clientY;
 					touchStartTime = Date.now();
 				}, { passive: true });
 				doc.addEventListener("touchend", (e) => {
-					if (e.changedTouches.length !== 1) return;
+					if (!touchStartTime || e.changedTouches.length !== 1) return;
 					const dx = e.changedTouches[0].clientX - touchStartX;
 					const dy = e.changedTouches[0].clientY - touchStartY;
+					const elapsed = Date.now() - touchStartTime;
+					touchStartTime = 0;
 					if (doc.getSelection()?.toString().trim()) return;
-					if (readerFlowRef.current === "scroll" && dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-						setChromeVisibleGuarded(false);
+					if (readerFlowRef.current === "scroll") {
+						if (dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.4) setChromeVisibleGuarded(false);
 						return;
 					}
-					if (Date.now() - touchStartTime > 650) return;
-					if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+					if (elapsed > 650) return;
+					if (Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(dy) * 2) {
 						if (dx < 0) rendition.next();
 						else rendition.prev();
 					}
@@ -43592,6 +43643,8 @@ function App() {
 		const handleResize = () => {
 			const nextIsMobile = window.innerWidth < 640;
 			setIsMobileViewport((prev) => prev === nextIsMobile ? prev : nextIsMobile);
+			const nextTouchOrMobile = window.innerWidth < 768 || "ontouchstart" in window;
+			setIsTouchOrMobileDevice((prev) => prev === nextTouchOrMobile ? prev : nextTouchOrMobile);
 			if (Date.now() < immersiveTransitionUntilRef.current) return;
 			clearTimeout(timer);
 			timer = setTimeout(() => safeResizeRendition(false), 200);
@@ -43670,13 +43723,50 @@ function App() {
 		showToast("Kosakata berhasil disimpan!", "success");
 	}, [showToast, vocabList]);
 	const handleAddBookmark = (0, import_react.useCallback)(() => {
-		const cfi = currentCfiRef.current;
-		if (!cfi) {
+		const rendition = renditionRef.current;
+		const liveLocation = rendition?.currentLocation() || null;
+		const cfi = liveLocation?.start?.cfi || currentCfiRef.current;
+		const href = liveLocation?.start?.href || currentSpineHrefRef.current || void 0;
+		if (!cfi && !href) {
 			showToast("Tunggu hingga halaman selesai dimuat.", "info");
 			return;
 		}
-		if (bookmarks.some((b) => b.bookId === currentBookIdRef.current && b.cfi === cfi)) {
-			showToast("Halaman ini sudah ada di daftar penanda.", "info");
+		let pct = progressPctRef.current;
+		if (cfi && locationsReadyRef.current && bookRef.current?.locations) {
+			const computedPct = Math.round(bookRef.current.locations.percentageFromCfi(cfi) * 100);
+			if (Number.isFinite(computedPct)) pct = Math.max(0, Math.min(100, computedPct));
+		}
+		let scrollRatio;
+		if (readerFlowRef.current === "scroll") {
+			const container = viewerRef.current?.querySelector(".epub-container");
+			if (container) {
+				const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+				scrollRatio = maxScroll > 0 ? Math.min(1, Math.max(0, container.scrollTop / maxScroll)) : 0;
+			}
+		}
+		let excerpt = "";
+		try {
+			const contentsList = rendition?.getContents() || [];
+			const activeContent = contentsList.find((c) => c.section?.href && href && hrefMatches(c.section.href, href)) || contentsList[0];
+			const doc = activeContent?.document;
+			if (doc?.body) {
+				const blocks = getTranslatableBlocks(doc);
+				const viewportH = activeContent.window?.innerHeight || window.innerHeight || 700;
+				const visibleBlock = blocks.find((el) => {
+					const rect = el.getBoundingClientRect();
+					return rect.bottom > 12 && rect.top < viewportH;
+				}) || blocks[0];
+				const rawText = normalizeBlockText(visibleBlock?.textContent || visibleBlock?.dataset?.origText || "");
+				if (rawText) excerpt = rawText.length > 78 ? `${rawText.slice(0, 75).trimEnd()}…` : rawText;
+			}
+		} catch {}
+		const resolvedCfi = cfi || href || "";
+		if (bookmarks.some((b) => {
+			if (b.bookId !== currentBookIdRef.current || b.cfi !== resolvedCfi) return false;
+			if (typeof scrollRatio === "number" && typeof b.scrollRatio === "number") return Math.abs(b.scrollRatio - scrollRatio) < .02;
+			return (b.progressPct ?? pct) === pct;
+		})) {
+			showToast("Posisi halaman ini sudah ada di daftar penanda.", "info");
 			return;
 		}
 		const next = [{
@@ -43684,7 +43774,11 @@ function App() {
 			bookId: currentBookIdRef.current,
 			bookTitle: currentBookTitleRef.current,
 			chapterTitle: currentChapterTitleRef.current,
-			cfi,
+			cfi: resolvedCfi,
+			href,
+			progressPct: pct,
+			scrollRatio,
+			excerpt: excerpt || void 0,
 			createdAt: (/* @__PURE__ */ new Date()).toLocaleDateString("id-ID", {
 				day: "numeric",
 				month: "short",
@@ -43694,8 +43788,30 @@ function App() {
 		}, ...bookmarks];
 		setBookmarks(next);
 		localStorage.setItem("reader_bookmarks", JSON.stringify(next));
-		showToast("Halaman berhasil ditandai!", "success");
+		showToast("Penanda berhasil ditambahkan!", "success");
 	}, [bookmarks, showToast]);
+	const handleSelectBookmark = (0, import_react.useCallback)(async (bm) => {
+		const rendition = renditionRef.current;
+		if (!rendition) return;
+		const target = bm.cfi || bm.href;
+		if (!target) return;
+		try {
+			await rendition.display(target);
+		} catch {
+			if (bm.href && bm.href !== target) try {
+				await rendition.display(bm.href);
+			} catch {}
+		}
+		if (readerFlowRef.current === "scroll" && typeof bm.scrollRatio === "number" && bm.scrollRatio > .01) setTimeout(() => {
+			const container = viewerRef.current?.querySelector(".epub-container");
+			if (!container) return;
+			const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+			if (maxScroll > 0 && container.scrollTop <= 16) container.scrollTo({
+				top: Math.round(maxScroll * bm.scrollRatio),
+				behavior: "auto"
+			});
+		}, 120);
+	}, []);
 	const handleOpenEpubFile = (0, import_react.useCallback)(async (file) => {
 		if (!file.name.toLowerCase().endsWith(".epub")) {
 			showToast("Harap pilih file berformat .epub", "error");
@@ -43812,7 +43928,7 @@ function App() {
 			}
 			if ((e.metaKey || e.ctrlKey) && e.key === "/") {
 				e.preventDefault();
-				setShortcutsOpen((v) => !v);
+				if (!isTouchOrMobileDevice) setShortcutsOpen((v) => !v);
 				return;
 			}
 			if (e.key === "Escape") {
@@ -43841,6 +43957,7 @@ function App() {
 		handleAddBookmark,
 		handleEscapeKey,
 		handleTranslateCurrentPage,
+		isTouchOrMobileDevice,
 		navigateReader,
 		scrollReaderVertical,
 		settingsOpen,
@@ -44330,9 +44447,8 @@ function App() {
 					toc,
 					onSelectTocHref: handleSelectTocHref,
 					bookmarks,
-					onSelectBookmark: (cfi) => {
-						renditionRef.current?.display(cfi).catch(() => {});
-					},
+					onAddBookmark: handleAddBookmark,
+					onSelectBookmark: handleSelectBookmark,
 					onDeleteBookmark: (id) => {
 						const next = bookmarks.filter((b) => b.id !== id);
 						setBookmarks(next);
@@ -44345,7 +44461,10 @@ function App() {
 						setVocabList(next);
 						localStorage.setItem("reader_vocab", JSON.stringify(next));
 					},
-					onOpenShortcuts: () => setShortcutsOpen(true)
+					onOpenShortcuts: () => {
+						if (!isTouchOrMobileDevice) setShortcutsOpen(true);
+					},
+					hideKeyboardShortcuts: isTouchOrMobileDevice
 				}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("main", {
 					className: "relative flex min-w-0 flex-1 flex-col overflow-hidden lg:flex-row",
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
