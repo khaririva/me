@@ -1,0 +1,103 @@
+{
+  "entities": {
+    "SyncChain": {
+      "title": "SyncChain",
+      "description": "Device sync room keyed by SHA-256 hash of an 8-word passphrase (no login required).",
+      "type": "object",
+      "properties": {
+        "chainHash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 hex digest of normalized Sync Chain passphrase."
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Epoch timestamp in milliseconds."
+        },
+        "lastDeviceId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "lastDeviceName": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "lastPosition": {
+          "type": "object",
+          "description": "Most recent reading position across devices."
+        },
+        "positions": {
+          "type": "object",
+          "description": "Per-book reading positions keyed by sanitized bookId."
+        },
+        "bookmarks": {
+          "type": "array",
+          "description": "Synchronized paragraph and page bookmarks."
+        },
+        "deletedBookmarkIds": {
+          "type": "object",
+          "description": "Tombstone map of deleted bookmark IDs to timestamps."
+        },
+        "devices": {
+          "type": "object",
+          "description": "Active connected devices keyed by deviceId with name, platform, and lastActive timestamp."
+        }
+      },
+      "required": ["chainHash", "updatedAt"]
+    },
+    "ChapterTranslationDoc": {
+      "title": "ChapterTranslationDoc",
+      "description": "Cached AI/draft chapter translation pairs synced per book and chapter index.",
+      "type": "object",
+      "properties": {
+        "bookId": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "bookTitle": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "targetLang": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "chapterIndex": {
+          "type": "number"
+        },
+        "href": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "stage": {
+          "type": "string",
+          "enum": ["draft", "polished"]
+        },
+        "pairs": {
+          "type": "array",
+          "description": "Translated paragraph pairs [{ orig, trans }]."
+        },
+        "updatedAt": {
+          "type": "number"
+        },
+        "deviceId": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": ["bookId", "targetLang", "chapterIndex", "href", "stage", "pairs", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/sync_chains/{chainHash}": {
+      "schema": { "$ref": "#/entities/SyncChain" },
+      "description": "Shared Sync Chain state for reading positions and paragraph bookmarks."
+    },
+    "/sync_chains/{chainHash}/translations/{translationId}": {
+      "schema": { "$ref": "#/entities/ChapterTranslationDoc" },
+      "description": "Cached chapter translations indexed by {bookId}_{chapterIndex}."
+    }
+  }
+}

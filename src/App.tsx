@@ -3,12 +3,13 @@ import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import ePub, { type Book, type Rendition } from 'epubjs';
 import {
+  BookMarked,
+  BookOpen,
   Bookmark,
   BookmarkPlus,
   ChevronLeft,
   ChevronRight,
   Download,
-  Languages,
   PanelLeft,
   Pause,
   Play,
@@ -37,6 +38,19 @@ import { SAMPLE_BOOK_ID, createSampleEpubBuffer } from './lib/sampleEpub';
 import { applyEpubJsFixes } from './lib/patchEpubJs';
 import { BookTranslationDB, LibraryDB } from './lib/storage';
 import { sanitizeTextForTranslation } from './lib/textSanitize';
+import {
+  clearStoredSyncPassphrase,
+  getFriendlyDeviceName,
+  getOrCreateDeviceId,
+  getStoredDeletedBookmarks,
+  getStoredSyncPassphrase,
+  mergeBookmarkLists,
+  recordDeletedBookmarkId,
+  sanitizeFirestoreKey,
+  saveCustomDeviceName,
+  saveStoredSyncPassphrase,
+  syncService,
+} from './services/syncService';
 
 applyEpubJsFixes();
 import type {
@@ -50,7 +64,11 @@ import type {
   ReaderTextAlign,
   ReaderTheme,
   ReadingMode,
+  RemotePositionPrompt,
   SidebarTab,
+  SyncConnectionStatus,
+  SyncDeviceInfo,
+  SyncReadingPosition,
   ToastMessage,
   TocNode,
   VocabItem,
@@ -74,6 +92,8 @@ interface RenditionContentsItem {
   section?: {
     href?: string;
   };
+  cfiFromNode?: (node: Node, ignoreClass?: string) => string;
+  cfiFromRange?: (range: Range, ignoreClass?: string) => string;
 }
 
 interface SpineSection {
@@ -186,7 +206,8 @@ function getTranslatableBlocks(doc: Document): HTMLElement[] {
 
 function captureOriginalBlocks(doc: Document): HTMLElement[] {
   const blocks = getTranslatableBlocks(doc);
-  blocks.forEach((node) => {
+  blocks.forEach((node, idx) => {
+    node.dataset.paragraphIndex = String(idx + 1);
     if (!node.dataset.origHtml) {
       node.dataset.origHtml = node.innerHTML;
       node.dataset.origText = normalizeBlockText(node.textContent || '');
@@ -320,9 +341,13 @@ export default function App() {
     }
   });
 
-  // Selection Popover & Translation Drawer
-  const [selectedText, setSelectedText] = useState<string>('');
-  const [popoverPos, setPopoverPos] = useState<{ x: number; y: number } | null>(null);
+  // Fixed Bottom Selection Action Bar & Translation Drawer
+  const [selectionBar, setSelectionBar] = useState<{
+    text: string;
+    cfiRange?: string;
+    href?: string;
+    paragraphIndex?: number;
+  } | null>(null);
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
   const [drawerSourceText, setDrawerSourceText] = useState<string>('');
   const [drawerResultText, setDrawerResultText] = useState<string>('');
@@ -346,6 +371,18 @@ export default function App() {
 
   // Toasts
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  // Brave-Style Sync Chain State
+  const [localDeviceId] = useState<string>(() => getOrCreateDeviceId());
+  const [localDeviceName, setLocalDeviceName] = useState<string>(() => getFriendlyDeviceName());
+  const [syncPassphrase, setSyncPassphrase] = useState<string>(() => getStoredSyncPassphrase());
+  const [syncChainHash, setSyncChainHash] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncConnectionStatus>(() =>
+    getStoredSyncPassphrase() ? 'connecting' : 'disconnected'
+  );
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncDevices, setSyncDevices] = useState<SyncDeviceInfo[]>([]);
+  const [remotePrompt, setRemotePrompt] = useState<RemotePositionPrompt | null>(null);
 
   // Platform Runtime, Fullscreen & Online Status
   const { isElectron } = usePWAInstall();
@@ -401,6 +438,18 @@ export default function App() {
   });
   const isAnyModalOpenRef = useRef<boolean>(false);
   const handleEscapeRef = useRef<() => void>(() => {});
+  const bookmarksRef = useRef<BookmarkItem[]>(bookmarks);
+  const deletedBookmarkIdsRef = useRef<Record<string, number>>(getStoredDeletedBookmarks());
+  const lastSeenRemotePosTimestampRef = useRef<number>(0);
+  const localPositionUpdatedAtRef = useRef<number>(0);
+  const wasSelfRegisteredRef = useRef<boolean>(false);
+  const flashHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollStopSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushCurrentReadingPositionToSyncRef = useRef<() => void>(() => {});
+  const lastDoubleTapHandledAtRef = useRef<number>(0);
+  const handleToggleParagraphBookmarkRef = useRef<
+    (blockEl: HTMLElement, sectionHref?: string, contentsItem?: RenditionContentsItem) => void
+  >(() => {});
   const batchControlRef = useRef<{ running: boolean; paused: boolean; cancelled: boolean }>({
     running: false,
     paused: false,
@@ -414,6 +463,10 @@ export default function App() {
   useEffect(() => {
     progressPctRef.current = progressPct;
   }, [progressPct]);
+
+  useEffect(() => {
+    bookmarksRef.current = bookmarks;
+  }, [bookmarks]);
 
   useEffect(() => {
     isAnyModalOpenRef.current = Boolean(
@@ -669,6 +722,30 @@ export default function App() {
         'border-color': `${palette.link} !important`,
         color: '#ffffff !important',
       },
+      '[data-bookmarked="true"]': {
+        'border-left': `3px solid ${palette.link} !important`,
+        'padding-left': '0.75em !important',
+        'background-color':
+          theme === 'dark'
+            ? 'rgba(96, 165, 250, 0.08) !important'
+            : theme === 'sepia'
+            ? 'rgba(180, 83, 9, 0.06) !important'
+            : 'rgba(37, 99, 235, 0.05) !important',
+        'border-radius': '0 6px 6px 0',
+        transition: 'border-color 0.15s ease, background-color 0.15s ease',
+      },
+      '[data-flash-highlight="true"]': {
+        'background-color':
+          theme === 'dark'
+            ? 'rgba(250, 204, 21, 0.24) !important'
+            : 'rgba(253, 224, 71, 0.42) !important',
+        'box-shadow':
+          theme === 'dark'
+            ? '0 0 0 4px rgba(250, 204, 21, 0.16)'
+            : '0 0 0 4px rgba(253, 224, 71, 0.28)',
+        'border-radius': '6px',
+        transition: 'background-color 0.35s ease, box-shadow 0.35s ease',
+      },
     });
     rendition.themes.select('custom');
     rendition.themes.fontSize(`${fontSize}%`);
@@ -677,6 +754,67 @@ export default function App() {
   useEffect(() => {
     applyRenditionStyling();
   }, [applyRenditionStyling]);
+
+  const syncBookmarkHighlightsInDoc = useCallback(
+    (doc: Document, sectionHref?: string, listOverride?: BookmarkItem[]) => {
+      if (!doc?.body) return;
+      const activeBookId = currentBookIdRef.current;
+      const targetHref = sectionHref || currentSpineHrefRef.current || '';
+      const activeList = listOverride ?? bookmarksRef.current;
+
+      const bookmarkedIndexes = new Set<number>();
+      activeList.forEach((bm) => {
+        if (bm.bookId !== activeBookId || typeof bm.paragraphIndex !== 'number') return;
+        if (bm.href && targetHref && !hrefMatches(bm.href, targetHref)) return;
+        bookmarkedIndexes.add(bm.paragraphIndex);
+      });
+
+      const taggedBlocks = doc.querySelectorAll('[data-paragraph-index]');
+      taggedBlocks.forEach((el) => {
+        const htmlEl = el as HTMLElement;
+        const idx = Number(htmlEl.dataset.paragraphIndex);
+        if (Number.isFinite(idx) && bookmarkedIndexes.has(idx)) {
+          htmlEl.dataset.bookmarked = 'true';
+        } else {
+          delete htmlEl.dataset.bookmarked;
+        }
+      });
+    },
+    []
+  );
+
+  const syncAllBookmarkHighlights = useCallback(
+    (listOverride?: BookmarkItem[]) => {
+      const rendition = renditionRef.current;
+      if (!rendition) return;
+      const contentsList = (rendition.getContents() || []) as unknown as RenditionContentsItem[];
+      contentsList.forEach((c) => {
+        if (c.document?.body) {
+          syncBookmarkHighlightsInDoc(c.document, c.section?.href, listOverride);
+        }
+      });
+    },
+    [syncBookmarkHighlightsInDoc]
+  );
+
+  useEffect(() => {
+    syncAllBookmarkHighlights();
+  }, [bookmarks, currentBookId, syncAllBookmarkHighlights]);
+
+  const clearReaderSelection = useCallback(() => {
+    setSelectionBar(null);
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+    try {
+      const contentsList = (rendition.getContents() || []) as unknown as RenditionContentsItem[];
+      contentsList.forEach((c) => {
+        c.window?.getSelection()?.removeAllRanges();
+        c.document?.getSelection()?.removeAllRanges();
+      });
+    } catch {
+      // ignore cross-frame cleanup errors
+    }
+  }, []);
 
   const safeResizeRendition = useCallback((force = false) => {
     const rendition = renditionRef.current as
@@ -838,6 +976,10 @@ export default function App() {
       () => {
         if (readerFlowRef.current !== 'scroll') return;
         handleScrollMetric(container.scrollTop, containerScrollTrackerRef.current);
+        if (scrollStopSyncTimerRef.current) clearTimeout(scrollStopSyncTimerRef.current);
+        scrollStopSyncTimerRef.current = setTimeout(() => {
+          pushCurrentReadingPositionToSyncRef.current();
+        }, 550);
       },
       { passive: true }
     );
@@ -1094,6 +1236,20 @@ export default function App() {
           await BookTranslationDB.saveBookCache(bookId, lang, bookTitle, otherCache);
         }
 
+        const spineItems = ((bookRef.current?.spine as unknown as { spineItems?: SpineSection[] })
+          ?.spineItems || []) as SpineSection[];
+        const chapterIdx = spineItems.findIndex((s) => hrefMatches(s.href, hrefKey));
+        syncService.scheduleTranslationSync({
+          bookId,
+          bookTitle,
+          targetLang: lang,
+          chapterIndex: chapterIdx >= 0 ? chapterIdx : 0,
+          href: hrefKey,
+          stage: polishedRecord.stage || 'polished',
+          pairs: polishedRecord.pairs,
+          updatedAt: polishedRecord.updatedAt,
+        });
+
         return polishedRecord;
       } catch (err) {
         if (!signal?.aborted) {
@@ -1157,6 +1313,19 @@ export default function App() {
           syncActiveIframesForHref(hrefKey, draftRecord);
         }
         void BookTranslationDB.saveBookCache(bookId, lang, bookTitle, chapterCacheRef.current);
+        const spineItems = ((bookRef.current?.spine as unknown as { spineItems?: SpineSection[] })
+          ?.spineItems || []) as SpineSection[];
+        const chapterIdx = spineItems.findIndex((s) => hrefMatches(s.href, hrefKey));
+        syncService.scheduleTranslationSync({
+          bookId,
+          bookTitle,
+          targetLang: lang,
+          chapterIndex: chapterIdx >= 0 ? chapterIdx : 0,
+          href: hrefKey,
+          stage: 'draft',
+          pairs: draftRecord.pairs,
+          updatedAt: draftRecord.updatedAt,
+        });
       }
 
       // Stage 2: Background AI Polish
@@ -1364,7 +1533,7 @@ export default function App() {
         setShowBatchBar(false);
         setChapterPolishStatus('idle');
         setLoaderText('Memuat isi buku EPUB...');
-        setPopoverPos(null);
+        setSelectionBar(null);
         scrollContainerBoundRef.current = null;
 
         if (bookRef.current) {
@@ -1432,8 +1601,9 @@ export default function App() {
           setCurrentChapterTitle(firstTitle);
         }
 
+        let initialRelocationHandled = false;
         rendition.on('relocated', async (location: RenditionLocation) => {
-          setPopoverPos(null);
+          setSelectionBar(null);
           if (location?.start) {
             const prevHref = normalizeHref(currentSpineHrefRef.current);
             const nextHref = normalizeHref(location.start.href);
@@ -1470,6 +1640,12 @@ export default function App() {
 
             await LibraryDB.updateProgress(currentBookIdRef.current, pct, location.start.cfi);
             await applyReadingModeToCurrentView(location.start.href);
+            syncAllBookmarkHighlights();
+            if (!initialRelocationHandled) {
+              initialRelocationHandled = true;
+            } else {
+              pushCurrentReadingPositionToSyncRef.current();
+            }
           }
         });
 
@@ -1481,36 +1657,50 @@ export default function App() {
           contentsList.forEach((c) => {
             if (c.document?.body) {
               syncScrollNavFooterInDoc(c.document, c.section?.href || section?.href);
+              syncBookmarkHighlightsInDoc(c.document, c.section?.href || section?.href);
             }
           });
           await applyReadingModeToCurrentView(section?.href);
+          syncAllBookmarkHighlights();
           expandScrolledViews();
           bindScrollAutoHide();
         });
 
-        rendition.on('selected', (_cfiRange: string, contents: { window: Window }) => {
+        rendition.on('selected', (cfiRange: string, contents: RenditionContentsItem) => {
           try {
+            if (Date.now() - lastDoubleTapHandledAtRef.current < 450) {
+              contents.window.getSelection()?.removeAllRanges();
+              setSelectionBar(null);
+              return;
+            }
             const selection = contents.window.getSelection();
             const text = selection ? selection.toString().trim() : '';
-            if (!selection || !text || !viewerRef.current || selection.rangeCount === 0) return;
+            if (!selection || !text || selection.rangeCount === 0) {
+              setSelectionBar(null);
+              return;
+            }
 
-            setSelectedText(text);
-            const range = selection.getRangeAt(0);
-            const rect = range.getBoundingClientRect();
-            const viewerRect = viewerRef.current.getBoundingClientRect();
+            const anchorNode = selection.anchorNode || selection.getRangeAt(0).commonAncestorContainer;
+            const anchorEl = (
+              anchorNode.nodeType === Node.TEXT_NODE ? anchorNode.parentElement : anchorNode
+            ) as HTMLElement | null;
+            const blockEl = anchorEl?.closest('[data-paragraph-index]') as HTMLElement | null;
+            const parsedIdx = blockEl?.dataset.paragraphIndex
+              ? Number(blockEl.dataset.paragraphIndex)
+              : undefined;
 
-            const popX = Math.min(
-              Math.max(viewerRect.left + rect.left + rect.width / 2, 150),
-              window.innerWidth - 150
-            );
-            const popY = Math.max(viewerRect.top + rect.top - 52, 72);
-            setPopoverPos({ x: popX, y: popY });
+            setSelectionBar({
+              text,
+              cfiRange,
+              href: contents.section?.href || currentSpineHrefRef.current || undefined,
+              paragraphIndex: Number.isFinite(parsedIdx) ? parsedIdx : undefined,
+            });
           } catch {
-            // ignore selection bounds error
+            // ignore selection inspection error
           }
         });
 
-        rendition.hooks.content.register((contents: { document: Document; section?: { href?: string } }) => {
+        rendition.hooks.content.register((contents: RenditionContentsItem) => {
           const doc = contents.document;
           captureOriginalBlocks(doc);
 
@@ -1523,6 +1713,7 @@ export default function App() {
           }
 
           syncScrollNavFooterInDoc(doc, contents.section?.href);
+          syncBookmarkHighlightsInDoc(doc, contents.section?.href);
 
           doc.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
@@ -1550,14 +1741,81 @@ export default function App() {
             }
           });
 
-          // Toggle auto-hide chrome cleanly when reader taps/clicks prose inside EPUB iframe
+          // Show/hide fixed bottom selection bar smoothly when native text selection changes
+          doc.addEventListener('selectionchange', () => {
+            if (Date.now() - lastDoubleTapHandledAtRef.current < 450) {
+              doc.getSelection()?.removeAllRanges();
+              setSelectionBar(null);
+              return;
+            }
+            const sel = doc.getSelection();
+            const text = sel ? sel.toString().trim() : '';
+            if (!text || !sel || sel.rangeCount === 0) {
+              setSelectionBar(null);
+              return;
+            }
+            const anchorNode = sel.anchorNode || sel.getRangeAt(0).commonAncestorContainer;
+            const anchorEl = (
+              anchorNode.nodeType === Node.TEXT_NODE ? anchorNode.parentElement : anchorNode
+            ) as HTMLElement | null;
+            const blockEl = anchorEl?.closest('[data-paragraph-index]') as HTMLElement | null;
+            const parsedIdx = blockEl?.dataset.paragraphIndex
+              ? Number(blockEl.dataset.paragraphIndex)
+              : undefined;
+            let cfiRange: string | undefined;
+            try {
+              cfiRange = contents.cfiFromRange?.(sel.getRangeAt(0));
+            } catch {
+              cfiRange = undefined;
+            }
+            setSelectionBar((prev) => ({
+              text,
+              cfiRange: cfiRange || prev?.cfiRange,
+              href: contents.section?.href || currentSpineHrefRef.current || undefined,
+              paragraphIndex: Number.isFinite(parsedIdx) ? parsedIdx : undefined,
+            }));
+          });
+
+          let singleTapTimer: ReturnType<typeof setTimeout> | null = null;
+          let lastTouchEndAt = 0;
+          let lastTapMeta: {
+            time: number;
+            x: number;
+            y: number;
+            paragraphIndex: string | null;
+          } | null = null;
+
+          const cancelSingleTapTimer = () => {
+            if (singleTapTimer !== null) {
+              clearTimeout(singleTapTimer);
+              singleTapTimer = null;
+            }
+          };
+
+          const scheduleChromeToggle = () => {
+            cancelSingleTapTimer();
+            singleTapTimer = setTimeout(() => {
+              singleTapTimer = null;
+              const activeSel = doc.getSelection()?.toString().trim();
+              if (activeSel) return;
+              if (Date.now() - lastDoubleTapHandledAtRef.current < 400) return;
+              setSettingsOpen(false);
+              toggleChromeByTap();
+            }, 240);
+          };
+
+          // Toggle auto-hide chrome on desktop single click; double-click toggles paragraph bookmark
           let pointerDownPos: { x: number; y: number; time: number } | null = null;
           doc.addEventListener('pointerdown', (e) => {
-            setPopoverPos(null);
             pointerDownPos = { x: e.clientX, y: e.clientY, time: Date.now() };
           });
 
           doc.addEventListener('click', (e) => {
+            if (Date.now() - lastTouchEndAt < 600) return;
+            if (Date.now() - lastDoubleTapHandledAtRef.current < 500 || e.detail >= 2) {
+              cancelSingleTapTimer();
+              return;
+            }
             const target = e.target as HTMLElement | null;
             if (target?.closest('a, button, input, select, textarea, [role="button"]')) return;
             const sel = doc.getSelection()?.toString().trim();
@@ -1568,23 +1826,40 @@ export default function App() {
               const heldLong = Date.now() - pointerDownPos.time > 400;
               if (moved || heldLong) return;
             }
-            setSettingsOpen(false);
-            toggleChromeByTap();
+            scheduleChromeToggle();
+          });
+
+          doc.addEventListener('dblclick', (e) => {
+            if (Date.now() - lastDoubleTapHandledAtRef.current < 500) return;
+            const target = e.target as HTMLElement | null;
+            if (target?.closest('a, button, input, select, textarea, [role="button"]')) return;
+            const blockEl = target?.closest('[data-paragraph-index]') as HTMLElement | null;
+            if (!blockEl) return;
+
+            cancelSingleTapTimer();
+            e.preventDefault();
+            lastDoubleTapHandledAtRef.current = Date.now();
+            doc.getSelection()?.removeAllRanges();
+            setSelectionBar(null);
+            handleToggleParagraphBookmarkRef.current(blockEl, contents.section?.href, contents);
           });
 
           let touchStartX = 0;
           let touchStartY = 0;
           let touchStartTime = 0;
+          let touchStartTarget: HTMLElement | null = null;
           doc.addEventListener(
             'touchstart',
             (e) => {
               if (e.touches.length !== 1) {
                 touchStartTime = 0;
+                touchStartTarget = null;
                 return;
               }
               touchStartX = e.touches[0].clientX;
               touchStartY = e.touches[0].clientY;
               touchStartTime = Date.now();
+              touchStartTarget = e.target as HTMLElement | null;
             },
             { passive: true }
           );
@@ -1592,12 +1867,68 @@ export default function App() {
             'touchend',
             (e) => {
               if (!touchStartTime || e.changedTouches.length !== 1) return;
-              const dx = e.changedTouches[0].clientX - touchStartX;
-              const dy = e.changedTouches[0].clientY - touchStartY;
+              const endX = e.changedTouches[0].clientX;
+              const endY = e.changedTouches[0].clientY;
+              const dx = endX - touchStartX;
+              const dy = endY - touchStartY;
               const elapsed = Date.now() - touchStartTime;
+              const tappedTarget = touchStartTarget;
               touchStartTime = 0;
+              touchStartTarget = null;
+              lastTouchEndAt = Date.now();
+
+              const isQuickTap = Math.hypot(dx, dy) < 14 && elapsed < 320;
+              const isInteractive = Boolean(
+                tappedTarget?.closest('a, button, input, select, textarea, [role="button"]')
+              );
+              const blockEl = tappedTarget?.closest('[data-paragraph-index]') as HTMLElement | null;
+
+              if (isQuickTap && !isInteractive && blockEl) {
+                const now = Date.now();
+                const blockIdx = blockEl.dataset.paragraphIndex || null;
+                if (
+                  lastTapMeta &&
+                  blockIdx &&
+                  lastTapMeta.paragraphIndex === blockIdx &&
+                  now - lastTapMeta.time < 340 &&
+                  Math.hypot(endX - lastTapMeta.x, endY - lastTapMeta.y) < 48
+                ) {
+                  // Double-tap detected on paragraph: prevent Android text selection & toggle bookmark
+                  e.preventDefault();
+                  cancelSingleTapTimer();
+                  lastTapMeta = null;
+                  lastDoubleTapHandledAtRef.current = now;
+                  doc.getSelection()?.removeAllRanges();
+                  setSelectionBar(null);
+                  handleToggleParagraphBookmarkRef.current(
+                    blockEl,
+                    contents.section?.href,
+                    contents
+                  );
+                  return;
+                }
+
+                lastTapMeta = {
+                  time: now,
+                  x: endX,
+                  y: endY,
+                  paragraphIndex: blockIdx,
+                };
+                const sel = doc.getSelection()?.toString().trim();
+                if (!sel) {
+                  scheduleChromeToggle();
+                }
+                return;
+              }
+
+              lastTapMeta = null;
               const sel = doc.getSelection()?.toString().trim();
               if (sel) return;
+
+              if (isQuickTap && !isInteractive) {
+                scheduleChromeToggle();
+                return;
+              }
 
               // In Vertical Scroll mode, horizontal chapter swipe is completely disabled to avoid accidental jumps
               if (readerFlowRef.current === 'scroll') {
@@ -1617,7 +1948,7 @@ export default function App() {
                 }
               }
             },
-            { passive: true }
+            { passive: false }
           );
 
           const iframeWin = doc.defaultView;
@@ -1632,6 +1963,10 @@ export default function App() {
               () => {
                 if (readerFlowRef.current !== 'scroll') return;
                 handleScrollMetric(iframeWin.scrollY || 0, iframeTracker);
+                if (scrollStopSyncTimerRef.current) clearTimeout(scrollStopSyncTimerRef.current);
+                scrollStopSyncTimerRef.current = setTimeout(() => {
+                  pushCurrentReadingPositionToSyncRef.current();
+                }, 550);
               },
               { passive: true }
             );
@@ -1702,6 +2037,21 @@ export default function App() {
           await refreshLibraryList();
           return;
         }
+      }
+
+      if (localStorage.getItem('pustakaloka_sample_dismissed') === 'true') {
+        if (mounted) {
+          currentBookIdRef.current = '';
+          currentBookTitleRef.current = 'Belum Ada Buku';
+          setCurrentBookId('');
+          setCurrentBookTitle('Belum Ada Buku');
+          setCurrentChapterTitle('');
+          setToc([]);
+          setProgressPct(0);
+          setPageLocationLabel('');
+          setLoaderText(null);
+        }
+        return;
       }
 
       const sampleBuffer = await createSampleEpubBuffer();
@@ -1862,17 +2212,11 @@ export default function App() {
     [showToast, vocabList]
   );
 
-  // Add current bookmark (captures chapter title, percentage, scroll ratio, and visible excerpt)
-  const handleAddBookmark = useCallback(() => {
+  const computeCurrentReadingMetrics = useCallback(() => {
     const rendition = renditionRef.current;
     const liveLocation = (rendition?.currentLocation() || null) as RenditionLocation | null;
-    const cfi = liveLocation?.start?.cfi || currentCfiRef.current;
+    const cfi = liveLocation?.start?.cfi || currentCfiRef.current || '';
     const href = liveLocation?.start?.href || currentSpineHrefRef.current || undefined;
-
-    if (!cfi && !href) {
-      showToast('Tunggu hingga halaman selesai dimuat.', 'info');
-      return;
-    }
 
     let pct = progressPctRef.current;
     if (cfi && locationsReadyRef.current && bookRef.current?.locations) {
@@ -1891,44 +2235,194 @@ export default function App() {
       }
     }
 
-    let excerpt = '';
-    try {
-      const contentsList = (rendition?.getContents() || []) as unknown as RenditionContentsItem[];
-      const activeContent =
-        contentsList.find((c) => c.section?.href && href && hrefMatches(c.section.href, href)) ||
-        contentsList[0];
-      const doc = activeContent?.document;
-      if (doc?.body) {
-        const blocks = getTranslatableBlocks(doc);
-        const viewportH = activeContent.window?.innerHeight || window.innerHeight || 700;
-        const visibleBlock =
-          blocks.find((el) => {
-            const rect = el.getBoundingClientRect();
-            return rect.bottom > 12 && rect.top < viewportH;
-          }) || blocks[0];
-        const rawText = normalizeBlockText(
-          visibleBlock?.textContent || visibleBlock?.dataset?.origText || ''
-        );
-        if (rawText) {
-          excerpt = rawText.length > 78 ? `${rawText.slice(0, 75).trimEnd()}…` : rawText;
-        }
-      }
-    } catch {
-      // ignore excerpt extraction failures
-    }
+    return { cfi, href, pct, scrollRatio };
+  }, []);
 
-    const resolvedCfi = cfi || href || '';
-    const exists = bookmarks.some((b) => {
-      if (b.bookId !== currentBookIdRef.current || b.cfi !== resolvedCfi) return false;
-      if (typeof scrollRatio === 'number' && typeof b.scrollRatio === 'number') {
-        return Math.abs(b.scrollRatio - scrollRatio) < 0.02;
+  const findTopmostVisibleBlock = useCallback(
+    (content?: RenditionContentsItem): HTMLElement | null => {
+      const doc = content?.document;
+      if (!doc?.body) return null;
+      const blocks = captureOriginalBlocks(doc);
+      if (blocks.length === 0) return null;
+
+      const viewerRect = viewerRef.current?.getBoundingClientRect();
+      const frameEl = doc.defaultView?.frameElement as HTMLElement | null;
+      const frameRect = frameEl?.getBoundingClientRect();
+
+      const visTop = viewerRect ? Math.max(viewerRect.top, 0) + 12 : 12;
+      const visBottom = viewerRect ? Math.min(viewerRect.bottom, window.innerHeight) : window.innerHeight;
+      const visLeft = viewerRect ? Math.max(viewerRect.left, 0) : 0;
+      const visRight = viewerRect ? Math.min(viewerRect.right, window.innerWidth) : window.innerWidth;
+
+      if (frameRect) {
+        const match = blocks.find((el) => {
+          const r = el.getBoundingClientRect();
+          const top = frameRect.top + r.top;
+          const bottom = frameRect.top + r.bottom;
+          const left = frameRect.left + r.left;
+          const right = frameRect.left + r.right;
+
+          const verticallyVisible = bottom > visTop && top < visBottom;
+          if (readerFlowRef.current === 'scroll') return verticallyVisible;
+          const horizontallyVisible = right > visLeft + 8 && left < visRight - 8;
+          return verticallyVisible && horizontallyVisible;
+        });
+        if (match) return match;
       }
-      return (b.progressPct ?? pct) === pct;
-    });
-    if (exists) {
-      showToast('Posisi halaman ini sudah ada di daftar penanda.', 'info');
+
+      const viewportH = content?.window?.innerHeight || window.innerHeight || 700;
+      return (
+        blocks.find((el) => {
+          const r = el.getBoundingClientRect();
+          return r.bottom > 12 && r.top < viewportH;
+        }) || blocks[0]
+      );
+    },
+    []
+  );
+
+  // Double-tap / double-click on a paragraph toggles bookmark for that paragraph
+  const handleToggleParagraphBookmark = useCallback(
+    (blockEl: HTMLElement, sectionHref?: string, contentsItem?: RenditionContentsItem) => {
+      const parsedIdx = Number(blockEl.dataset.paragraphIndex);
+      if (!Number.isFinite(parsedIdx) || parsedIdx <= 0) return;
+
+      const bookId = currentBookIdRef.current;
+      const { cfi, href, pct, scrollRatio } = computeCurrentReadingMetrics();
+      const resolvedHref = sectionHref || href;
+
+      const existingIdx = bookmarksRef.current.findIndex((b) => {
+        if (b.bookId !== bookId || b.paragraphIndex !== parsedIdx) return false;
+        if (b.href && resolvedHref) return hrefMatches(b.href, resolvedHref);
+        return true;
+      });
+
+      if (existingIdx >= 0) {
+        const removed = bookmarksRef.current[existingIdx];
+        const next = bookmarksRef.current.filter((_, i) => i !== existingIdx);
+        bookmarksRef.current = next;
+        setBookmarks(next);
+        localStorage.setItem('reader_bookmarks', JSON.stringify(next));
+        syncAllBookmarkHighlights(next);
+        if (removed?.id) {
+          deletedBookmarkIdsRef.current = recordDeletedBookmarkId(removed.id);
+        }
+        syncService.scheduleBookmarksSync(next, deletedBookmarkIdsRef.current);
+        showToast(`Penanda pada paragraf #${parsedIdx} dihapus.`, 'info');
+        return;
+      }
+
+      let blockCfi = cfi || resolvedHref || '';
+      try {
+        const nodeCfi = contentsItem?.cfiFromNode?.(blockEl);
+        if (nodeCfi) blockCfi = nodeCfi;
+      } catch {
+        // fallback to current CFI
+      }
+
+      const rawText = normalizeBlockText(blockEl.textContent || blockEl.dataset.origText || '');
+      const excerpt = rawText
+        ? rawText.length > 78
+          ? `${rawText.slice(0, 75).trimEnd()}…`
+          : rawText
+        : undefined;
+
+      const newBookmark: BookmarkItem = {
+        id: `${Date.now()}-${parsedIdx}`,
+        bookId,
+        bookTitle: currentBookTitleRef.current,
+        chapterTitle: currentChapterTitleRef.current,
+        cfi: blockCfi,
+        href: resolvedHref,
+        paragraphIndex: parsedIdx,
+        progressPct: pct,
+        scrollRatio,
+        excerpt,
+        createdAt: new Date().toLocaleDateString('id-ID', {
+          day: 'numeric',
+          month: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      };
+
+      const next = [newBookmark, ...bookmarksRef.current];
+      bookmarksRef.current = next;
+      setBookmarks(next);
+      localStorage.setItem('reader_bookmarks', JSON.stringify(next));
+      syncAllBookmarkHighlights(next);
+      syncService.scheduleBookmarksSync(next, deletedBookmarkIdsRef.current);
+      showToast(`Penanda disimpan pada paragraf #${parsedIdx}`, 'success');
+    },
+    [computeCurrentReadingMetrics, showToast, syncAllBookmarkHighlights]
+  );
+
+  useEffect(() => {
+    handleToggleParagraphBookmarkRef.current = handleToggleParagraphBookmark;
+  }, [handleToggleParagraphBookmark]);
+
+  // Add bookmark from Sidebar "+ Tambah Penanda" or Header button (marks topmost visible paragraph)
+  const handleAddBookmark = useCallback(() => {
+    const rendition = renditionRef.current;
+    const { cfi, href, pct, scrollRatio } = computeCurrentReadingMetrics();
+
+    if (!cfi && !href) {
+      showToast('Tunggu hingga halaman selesai dimuat.', 'info');
       return;
     }
+
+    let visibleBlock: HTMLElement | null = null;
+    let activeContent: RenditionContentsItem | undefined;
+    try {
+      const contentsList = (rendition?.getContents() || []) as unknown as RenditionContentsItem[];
+      activeContent =
+        contentsList.find((c) => c.section?.href && href && hrefMatches(c.section.href, href)) ||
+        contentsList[0];
+      visibleBlock = findTopmostVisibleBlock(activeContent);
+    } catch {
+      visibleBlock = null;
+    }
+
+    const parsedIdx = visibleBlock?.dataset.paragraphIndex
+      ? Number(visibleBlock.dataset.paragraphIndex)
+      : undefined;
+    const paragraphIndex =
+      typeof parsedIdx === 'number' && Number.isFinite(parsedIdx) && parsedIdx > 0
+        ? parsedIdx
+        : undefined;
+
+    if (typeof paragraphIndex === 'number') {
+      const duplicate = bookmarksRef.current.some((b) => {
+        if (b.bookId !== currentBookIdRef.current || b.paragraphIndex !== paragraphIndex) {
+          return false;
+        }
+        if (b.href && href) return hrefMatches(b.href, href);
+        return true;
+      });
+      if (duplicate) {
+        showToast(`Paragraf #${paragraphIndex} sudah ada di daftar penanda.`, 'info');
+        return;
+      }
+    }
+
+    let resolvedCfi = cfi || href || '';
+    if (visibleBlock && activeContent?.cfiFromNode) {
+      try {
+        const nodeCfi = activeContent.cfiFromNode(visibleBlock);
+        if (nodeCfi) resolvedCfi = nodeCfi;
+      } catch {
+        // fallback to live CFI
+      }
+    }
+
+    const rawText = visibleBlock
+      ? normalizeBlockText(visibleBlock.textContent || visibleBlock.dataset.origText || '')
+      : '';
+    const excerpt = rawText
+      ? rawText.length > 78
+        ? `${rawText.slice(0, 75).trimEnd()}…`
+        : rawText
+      : undefined;
 
     const newBookmark: BookmarkItem = {
       id: Date.now().toString(),
@@ -1937,9 +2431,10 @@ export default function App() {
       chapterTitle: currentChapterTitleRef.current,
       cfi: resolvedCfi,
       href,
+      paragraphIndex,
       progressPct: pct,
       scrollRatio,
-      excerpt: excerpt || undefined,
+      excerpt,
       createdAt: new Date().toLocaleDateString('id-ID', {
         day: 'numeric',
         month: 'short',
@@ -1948,41 +2443,592 @@ export default function App() {
       }),
     };
 
-    const next = [newBookmark, ...bookmarks];
+    const next = [newBookmark, ...bookmarksRef.current];
+    bookmarksRef.current = next;
     setBookmarks(next);
     localStorage.setItem('reader_bookmarks', JSON.stringify(next));
-    showToast('Penanda berhasil ditambahkan!', 'success');
-  }, [bookmarks, showToast]);
+    syncAllBookmarkHighlights(next);
+    syncService.scheduleBookmarksSync(next, deletedBookmarkIdsRef.current);
+    showToast(
+      typeof paragraphIndex === 'number'
+        ? `Penanda disimpan pada paragraf #${paragraphIndex}`
+        : 'Penanda berhasil ditambahkan!',
+      'success'
+    );
+  }, [computeCurrentReadingMetrics, findTopmostVisibleBlock, showToast, syncAllBookmarkHighlights]);
 
-  const handleSelectBookmark = useCallback(async (bm: BookmarkItem) => {
-    const rendition = renditionRef.current;
-    if (!rendition) return;
-    const target = bm.cfi || bm.href;
-    if (!target) return;
+  const handleBookmarkSelection = useCallback(() => {
+    if (!selectionBar) return;
+    const { cfi, href, pct, scrollRatio } = computeCurrentReadingMetrics();
+    const resolvedHref = selectionBar.href || href;
+    const paragraphIndex = selectionBar.paragraphIndex;
+    const cleanText = normalizeBlockText(selectionBar.text);
+    const excerpt =
+      cleanText.length > 90 ? `${cleanText.slice(0, 87).trimEnd()}…` : cleanText || undefined;
 
-    try {
-      await rendition.display(target);
-    } catch {
-      if (bm.href && bm.href !== target) {
-        try {
-          await rendition.display(bm.href);
-        } catch {
-          // ignore unresolvable fallback
+    const newBookmark: BookmarkItem = {
+      id: `${Date.now()}-${paragraphIndex ?? 'sel'}`,
+      bookId: currentBookIdRef.current,
+      bookTitle: currentBookTitleRef.current,
+      chapterTitle: currentChapterTitleRef.current,
+      cfi: selectionBar.cfiRange || cfi || resolvedHref || '',
+      href: resolvedHref,
+      paragraphIndex,
+      progressPct: pct,
+      scrollRatio,
+      excerpt,
+      createdAt: new Date().toLocaleDateString('id-ID', {
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    };
+
+    const next = [newBookmark, ...bookmarksRef.current];
+    bookmarksRef.current = next;
+    setBookmarks(next);
+    localStorage.setItem('reader_bookmarks', JSON.stringify(next));
+    syncAllBookmarkHighlights(next);
+    syncService.scheduleBookmarksSync(next, deletedBookmarkIdsRef.current);
+    clearReaderSelection();
+    showToast(
+      typeof paragraphIndex === 'number'
+        ? `Kalimat ditandai pada paragraf #${paragraphIndex}`
+        : 'Kalimat berhasil ditandai!',
+      'success'
+    );
+  }, [clearReaderSelection, computeCurrentReadingMetrics, selectionBar, showToast, syncAllBookmarkHighlights]);
+
+  const handleSelectBookmark = useCallback(
+    async (bm: BookmarkItem) => {
+      const rendition = renditionRef.current;
+      if (!rendition) return;
+      const target = bm.cfi || bm.href;
+      if (!target) return;
+
+      try {
+        await rendition.display(target);
+      } catch {
+        if (bm.href && bm.href !== target) {
+          try {
+            await rendition.display(bm.href);
+          } catch {
+            // ignore unresolvable fallback
+          }
         }
       }
+
+      syncAllBookmarkHighlights();
+
+      setTimeout(() => {
+        const contentsList = (rendition.getContents() || []) as unknown as RenditionContentsItem[];
+        const targetContent =
+          contentsList.find(
+            (c) => c.section?.href && bm.href && hrefMatches(c.section.href, bm.href)
+          ) || contentsList[0];
+
+        if (typeof bm.paragraphIndex === 'number') {
+          const el = targetContent?.document?.querySelector(
+            `[data-paragraph-index="${bm.paragraphIndex}"]`
+          ) as HTMLElement | null;
+
+          if (el) {
+            try {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } catch {
+              // ignore nested iframe scroll fallback
+            }
+
+            if (readerFlowRef.current === 'scroll') {
+              const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+              const frameEl = targetContent?.document?.defaultView?.frameElement as HTMLElement | null;
+              if (container && frameEl) {
+                const containerRect = container.getBoundingClientRect();
+                const frameRect = frameEl.getBoundingClientRect();
+                const elRect = el.getBoundingClientRect();
+                const targetTop =
+                  frameRect.top +
+                  elRect.top -
+                  containerRect.top +
+                  container.scrollTop -
+                  Math.max(72, Math.round(container.clientHeight * 0.35));
+                container.scrollTo({ top: Math.max(0, Math.round(targetTop)), behavior: 'smooth' });
+              }
+            }
+
+            if (flashHighlightTimerRef.current) clearTimeout(flashHighlightTimerRef.current);
+            el.dataset.flashHighlight = 'true';
+            flashHighlightTimerRef.current = setTimeout(() => {
+              delete el.dataset.flashHighlight;
+              flashHighlightTimerRef.current = null;
+            }, 2000);
+            return;
+          }
+        }
+
+        if (readerFlowRef.current === 'scroll' && typeof bm.scrollRatio === 'number' && bm.scrollRatio > 0.01) {
+          const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
+          if (!container) return;
+          const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+          if (maxScroll > 0 && container.scrollTop <= 16) {
+            container.scrollTo({
+              top: Math.round(maxScroll * bm.scrollRatio),
+              behavior: 'smooth',
+            });
+          }
+        }
+      }, 160);
+    },
+    [syncAllBookmarkHighlights]
+  );
+
+  const pushCurrentReadingPositionToSync = useCallback(() => {
+    if (!syncService.getActiveChainHash()) return;
+    const rendition = renditionRef.current;
+    const { cfi, href, pct, scrollRatio } = computeCurrentReadingMetrics();
+    if (!cfi && !href) return;
+
+    const spineItems = ((bookRef.current?.spine as unknown as { spineItems?: SpineSection[] })
+      ?.spineItems || []) as SpineSection[];
+    const foundIdx = href ? spineItems.findIndex((s) => hrefMatches(s.href, href)) : -1;
+
+    let paragraphIndex: number | undefined;
+    try {
+      const contentsList = (rendition?.getContents() || []) as unknown as RenditionContentsItem[];
+      const activeContent =
+        contentsList.find((c) => c.section?.href && href && hrefMatches(c.section.href, href)) ||
+        contentsList[0];
+      const topBlock = findTopmostVisibleBlock(activeContent);
+      const parsed = topBlock?.dataset.paragraphIndex ? Number(topBlock.dataset.paragraphIndex) : NaN;
+      if (Number.isFinite(parsed) && parsed > 0) paragraphIndex = parsed;
+    } catch {
+      paragraphIndex = undefined;
     }
 
-    if (readerFlowRef.current === 'scroll' && typeof bm.scrollRatio === 'number' && bm.scrollRatio > 0.01) {
-      setTimeout(() => {
-        const container = viewerRef.current?.querySelector('.epub-container') as HTMLElement | null;
-        if (!container) return;
-        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-        if (maxScroll > 0 && container.scrollTop <= 16) {
-          container.scrollTo({ top: Math.round(maxScroll * bm.scrollRatio!), behavior: 'auto' });
-        }
-      }, 120);
+    const now = Date.now();
+    localPositionUpdatedAtRef.current = now;
+    syncService.schedulePositionSync({
+      bookId: currentBookIdRef.current,
+      bookTitle: currentBookTitleRef.current,
+      chapterTitle: currentChapterTitleRef.current,
+      chapterIndex: foundIdx >= 0 ? foundIdx : 0,
+      href,
+      cfi: cfi || href || '',
+      paragraphIndex,
+      progressPct: pct,
+      scrollRatio,
+      updatedAt: now,
+      deviceId: getOrCreateDeviceId(),
+      deviceName: getFriendlyDeviceName(),
+    });
+  }, [computeCurrentReadingMetrics, findTopmostVisibleBlock]);
+
+  useEffect(() => {
+    pushCurrentReadingPositionToSyncRef.current = pushCurrentReadingPositionToSync;
+  }, [pushCurrentReadingPositionToSync]);
+
+  const handleAcceptRemotePosition = useCallback(
+    async (pos: SyncReadingPosition) => {
+      setRemotePrompt(null);
+      localPositionUpdatedAtRef.current = Date.now();
+      await handleSelectBookmark({
+        id: 'remote-pos',
+        bookId: pos.bookId,
+        bookTitle: pos.bookTitle,
+        chapterTitle: pos.chapterTitle,
+        cfi: pos.cfi,
+        href: pos.href,
+        paragraphIndex: pos.paragraphIndex,
+        progressPct: pos.progressPct,
+        scrollRatio: pos.scrollRatio,
+        createdAt: '',
+      });
+    },
+    [handleSelectBookmark]
+  );
+
+  const handleLeaveSyncChain = useCallback(() => {
+    clearStoredSyncPassphrase();
+    syncService.disconnect();
+    wasSelfRegisteredRef.current = false;
+    setSyncPassphrase('');
+    setSyncChainHash(null);
+    setSyncStatus('disconnected');
+    setSyncError(null);
+    setSyncDevices([]);
+    setRemotePrompt(null);
+    showToast('Keluar dari Sync Chain.', 'info');
+  }, [showToast]);
+
+  // Real-time Sync Chain connection lifecycle (onSnapshot + auto-merge + device registry)
+  useEffect(() => {
+    if (!syncPassphrase) {
+      syncService.disconnect();
+      wasSelfRegisteredRef.current = false;
+      setSyncChainHash(null);
+      setSyncStatus('disconnected');
+      setSyncError(null);
+      setSyncDevices([]);
+      setRemotePrompt(null);
+      return;
     }
-  }, []);
+
+    let cancelled = false;
+    wasSelfRegisteredRef.current = false;
+
+    const connectChain = async () => {
+      try {
+        const hash = await syncService.connect(syncPassphrase, {
+          onStatusChange: (status, message) => {
+            if (cancelled) return;
+            setSyncStatus(status);
+            if (message && status === 'error') setSyncError(message);
+            else if (status !== 'error') setSyncError(null);
+          },
+          onRemoteChainData: (data) => {
+            if (cancelled) return;
+
+            if (!data) {
+              wasSelfRegisteredRef.current = true;
+              void syncService.registerDeviceNow();
+              syncService.scheduleBookmarksSync(bookmarksRef.current, deletedBookmarkIdsRef.current);
+              pushCurrentReadingPositionToSyncRef.current();
+              return;
+            }
+
+            // 0. Sync Connected Devices Registry
+            const devicesMap = data.devices || {};
+            if (wasSelfRegisteredRef.current && data.devices && !devicesMap[localDeviceId]) {
+              handleLeaveSyncChain();
+              showToast('Perangkat ini telah dihapus dari Sync Chain.', 'info');
+              return;
+            }
+            if (devicesMap[localDeviceId]) {
+              wasSelfRegisteredRef.current = true;
+            } else {
+              wasSelfRegisteredRef.current = true;
+              void syncService.registerDeviceNow();
+            }
+
+            const sortedDevices = Object.values(devicesMap)
+              .filter((d): d is SyncDeviceInfo => Boolean(d?.deviceId && d?.name))
+              .sort((a, b) => {
+                if (a.deviceId === localDeviceId) return -1;
+                if (b.deviceId === localDeviceId) return 1;
+                return (b.lastActive || 0) - (a.lastActive || 0);
+              });
+            setSyncDevices(sortedDevices);
+
+            // 1. Merge deleted bookmark tombstones & bookmarks
+            const remoteDeleted = data.deletedBookmarkIds || {};
+            const mergedDeleted = { ...deletedBookmarkIdsRef.current };
+            let deletedChanged = false;
+            Object.entries(remoteDeleted).forEach(([id, ts]) => {
+              if (!mergedDeleted[id] || ts > mergedDeleted[id]) {
+                mergedDeleted[id] = ts;
+                deletedChanged = true;
+              }
+            });
+            if (deletedChanged) {
+              deletedBookmarkIdsRef.current = mergedDeleted;
+              try {
+                localStorage.setItem(
+                  'pustakaloka_sync_deleted_bookmarks',
+                  JSON.stringify(mergedDeleted)
+                );
+              } catch {
+                // ignore storage quota errors
+              }
+            }
+
+            const remoteBookmarks = Array.isArray(data.bookmarks) ? data.bookmarks : [];
+            const mergedBookmarks = mergeBookmarkLists(
+              bookmarksRef.current,
+              remoteBookmarks,
+              mergedDeleted
+            );
+
+            const localIds = bookmarksRef.current
+              .map((b) => b.id)
+              .sort()
+              .join(',');
+            const mergedIds = mergedBookmarks
+              .map((b) => b.id)
+              .sort()
+              .join(',');
+            const remoteIds = remoteBookmarks
+              .filter((b) => !mergedDeleted[b.id])
+              .map((b) => b.id)
+              .sort()
+              .join(',');
+
+            if (localIds !== mergedIds) {
+              bookmarksRef.current = mergedBookmarks;
+              setBookmarks(mergedBookmarks);
+              localStorage.setItem('reader_bookmarks', JSON.stringify(mergedBookmarks));
+              syncAllBookmarkHighlights(mergedBookmarks);
+            }
+
+            if (mergedIds !== remoteIds) {
+              syncService.scheduleBookmarksSync(mergedBookmarks, mergedDeleted);
+            }
+
+            // 2. Check for newer reading position from another device (match by bookId or bookTitle)
+            const bookKey = sanitizeFirestoreKey(currentBookIdRef.current, 72);
+            const normalizedTitle = currentBookTitleRef.current.trim().toLowerCase();
+            const matchedByTitle = normalizedTitle
+              ? Object.values(data.positions || {}).find(
+                  (p) => p?.bookTitle?.trim().toLowerCase() === normalizedTitle
+                )
+              : undefined;
+            const candidate =
+              data.positions?.[bookKey] ||
+              matchedByTitle ||
+              (data.lastPosition &&
+              (data.lastPosition.bookId === currentBookIdRef.current ||
+                data.lastPosition.bookTitle.trim().toLowerCase() === normalizedTitle)
+                ? data.lastPosition
+                : undefined);
+
+            if (
+              candidate &&
+              candidate.deviceId !== localDeviceId &&
+              candidate.updatedAt > lastSeenRemotePosTimestampRef.current &&
+              candidate.updatedAt > localPositionUpdatedAtRef.current
+            ) {
+              let isDifferent = true;
+              const sameHref = hrefMatches(candidate.href, currentSpineHrefRef.current);
+              if (sameHref) {
+                try {
+                  const contentsList = (renditionRef.current?.getContents() ||
+                    []) as unknown as RenditionContentsItem[];
+                  const activeContent =
+                    contentsList.find(
+                      (c) =>
+                        c.section?.href &&
+                        candidate.href &&
+                        hrefMatches(c.section.href, candidate.href)
+                    ) || contentsList[0];
+                  const topBlock = findTopmostVisibleBlock(activeContent);
+                  const currentPara = topBlock?.dataset.paragraphIndex
+                    ? Number(topBlock.dataset.paragraphIndex)
+                    : undefined;
+                  if (
+                    typeof candidate.paragraphIndex === 'number' &&
+                    currentPara === candidate.paragraphIndex
+                  ) {
+                    isDifferent = false;
+                  } else if (
+                    typeof candidate.paragraphIndex !== 'number' &&
+                    Math.abs((candidate.progressPct || 0) - progressPctRef.current) <= 2
+                  ) {
+                    isDifferent = false;
+                  }
+                } catch {
+                  // assume different if inspection fails
+                }
+              }
+
+              if (isDifferent) {
+                lastSeenRemotePosTimestampRef.current = candidate.updatedAt;
+                setRemotePrompt({ position: candidate });
+              }
+            }
+          },
+          onRemoteTranslations: async (docs) => {
+            if (cancelled) return;
+            const activeBookId = currentBookIdRef.current;
+            const activeBookTitle = currentBookTitleRef.current;
+            const activeLang = targetLangRef.current;
+
+            let updatedCurrentCache = false;
+            const otherBooksQueue = new Map<
+              string,
+              {
+                bookId: string;
+                bookTitle: string;
+                targetLang: string;
+                items: typeof docs;
+              }
+            >();
+
+            for (const item of docs) {
+              const matchesCurrentBook =
+                item.bookId === activeBookId ||
+                (Boolean(item.bookTitle) && item.bookTitle === activeBookTitle);
+
+              if (matchesCurrentBook && item.targetLang === activeLang) {
+                const existing = findCachedChapterInMemory(item.href);
+                const shouldAccept =
+                  !existing ||
+                  item.updatedAt > existing.updatedAt ||
+                  (item.stage === 'polished' && existing.stage !== 'polished');
+                if (shouldAccept) {
+                  chapterCacheRef.current[item.href] = {
+                    href: item.href,
+                    pairs: item.pairs,
+                    stage: item.stage,
+                    updatedAt: item.updatedAt,
+                  };
+                  updatedCurrentCache = true;
+                }
+              } else {
+                const key = `${item.bookId}::${item.targetLang}`;
+                if (!otherBooksQueue.has(key)) {
+                  otherBooksQueue.set(key, {
+                    bookId: item.bookId,
+                    bookTitle: item.bookTitle,
+                    targetLang: item.targetLang,
+                    items: [],
+                  });
+                }
+                otherBooksQueue.get(key)!.items.push(item);
+              }
+            }
+
+            if (updatedCurrentCache) {
+              setHasCachedChapters(true);
+              await BookTranslationDB.saveBookCache(
+                activeBookId,
+                activeLang,
+                activeBookTitle,
+                chapterCacheRef.current
+              );
+              const activeHref = currentSpineHrefRef.current;
+              if (activeHref && readingModeRef.current !== 'original') {
+                const cachedActive = findCachedChapterInMemory(activeHref);
+                if (cachedActive) {
+                  syncActiveIframesForHref(activeHref, cachedActive);
+                  setChapterPolishStatus(
+                    cachedActive.stage === 'polished' ? 'polished' : 'draft-only'
+                  );
+                }
+              }
+            }
+
+            for (const entry of otherBooksQueue.values()) {
+              const existingCache = await BookTranslationDB.getBookCache(
+                entry.bookId,
+                entry.targetLang
+              );
+              let dirty = false;
+              for (const item of entry.items) {
+                const prev = existingCache[item.href];
+                if (
+                  !prev ||
+                  item.updatedAt > prev.updatedAt ||
+                  (item.stage === 'polished' && prev.stage !== 'polished')
+                ) {
+                  existingCache[item.href] = {
+                    href: item.href,
+                    pairs: item.pairs,
+                    stage: item.stage,
+                    updatedAt: item.updatedAt,
+                  };
+                  dirty = true;
+                }
+              }
+              if (dirty) {
+                await BookTranslationDB.saveBookCache(
+                  entry.bookId,
+                  entry.targetLang,
+                  entry.bookTitle,
+                  existingCache
+                );
+              }
+            }
+          },
+        });
+
+        if (!cancelled) {
+          setSyncChainHash(hash);
+          // Seed cached chapters silently (position & bookmarks wait for initial snapshot to avoid overwriting newer remote state)
+          const spineItems = ((bookRef.current?.spine as unknown as { spineItems?: SpineSection[] })
+            ?.spineItems || []) as SpineSection[];
+          Object.values(chapterCacheRef.current).forEach((rec) => {
+            if (!rec?.pairs?.length) return;
+            const idx = spineItems.findIndex((s) => hrefMatches(s.href, rec.href));
+            syncService.scheduleTranslationSync({
+              bookId: currentBookIdRef.current,
+              bookTitle: currentBookTitleRef.current,
+              targetLang: targetLangRef.current,
+              chapterIndex: idx >= 0 ? idx : 0,
+              href: rec.href,
+              stage: rec.stage || 'polished',
+              pairs: rec.pairs,
+              updatedAt: rec.updatedAt || Date.now(),
+            });
+          });
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSyncStatus('error');
+          setSyncError(err instanceof Error ? err.message : 'Gagal menghubungkan Sync Chain.');
+        }
+      }
+    };
+
+    void connectChain();
+
+    const handleVisibilityRefresh = () => {
+      if (document.visibilityState === 'visible' && syncService.getActiveChainHash()) {
+        void syncService.registerDeviceNow();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityRefresh);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', handleVisibilityRefresh);
+      syncService.disconnect();
+    };
+  }, [
+    findCachedChapterInMemory,
+    findTopmostVisibleBlock,
+    handleLeaveSyncChain,
+    localDeviceId,
+    showToast,
+    syncAllBookmarkHighlights,
+    syncActiveIframesForHref,
+    syncPassphrase,
+  ]);
+
+  const handleJoinOrCreateSyncChain = useCallback(
+    (rawPassphrase: string) => {
+      const normalized = saveStoredSyncPassphrase(rawPassphrase);
+      if (!normalized) return;
+      lastSeenRemotePosTimestampRef.current = 0;
+      setSyncError(null);
+      setSyncPassphrase(normalized);
+      showToast('Perangkat terhubung ke Sync Chain!', 'success');
+    },
+    [showToast]
+  );
+
+  const handleRenameSyncDevice = useCallback(
+    async (rawName: string) => {
+      const resolved = saveCustomDeviceName(rawName);
+      setLocalDeviceName(resolved);
+      if (syncService.getActiveChainHash()) {
+        await syncService.registerDeviceNow();
+      }
+      showToast(`Nama perangkat diperbarui menjadi "${resolved}"`, 'success');
+    },
+    [showToast]
+  );
+
+  const handleRemoveSyncDevice = useCallback(
+    async (targetDeviceId: string) => {
+      await syncService.removeDeviceFromChain(targetDeviceId);
+      if (targetDeviceId === localDeviceId) {
+        handleLeaveSyncChain();
+      } else {
+        showToast('Perangkat dihapus dari Sync Chain.', 'info');
+      }
+    },
+    [handleLeaveSyncChain, localDeviceId, showToast]
+  );
 
   // Handle EPUB File open
   const handleOpenEpubFile = useCallback(
@@ -2009,7 +3055,7 @@ export default function App() {
       settingsOpen ||
         apiSettingsOpen ||
         shortcutsOpen ||
-        popoverPos !== null ||
+        selectionBar !== null ||
         drawerOpen ||
         sidebarMobileOpen
     );
@@ -2018,7 +3064,7 @@ export default function App() {
       setSettingsOpen(false);
       setApiSettingsOpen(false);
       setShortcutsOpen(false);
-      setPopoverPos(null);
+      clearReaderSelection();
       setDrawerOpen(false);
       setSidebarMobileOpen(false);
       setChromeVisible(true);
@@ -2029,7 +3075,15 @@ export default function App() {
       void document.exitFullscreen().catch(() => {});
     }
     setChromeVisible(true);
-  }, [apiSettingsOpen, drawerOpen, popoverPos, settingsOpen, shortcutsOpen, sidebarMobileOpen]);
+  }, [
+    apiSettingsOpen,
+    clearReaderSelection,
+    drawerOpen,
+    selectionBar,
+    settingsOpen,
+    shortcutsOpen,
+    sidebarMobileOpen,
+  ]);
 
   useEffect(() => {
     handleEscapeRef.current = handleEscapeKey;
@@ -2488,11 +3542,11 @@ export default function App() {
       )}
 
       {/* Toast Container */}
-      <div className="pointer-events-none fixed bottom-20 right-3 z-50 flex flex-col gap-2 sm:bottom-16 sm:right-4">
+      <div className="pointer-events-none fixed inset-x-4 bottom-[max(4.75rem,calc(4.25rem+env(safe-area-inset-bottom)))] z-[60] flex flex-col items-center gap-2 sm:inset-x-auto sm:bottom-16 sm:right-4 sm:items-end">
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`pointer-events-auto rounded-xl border px-4 py-2.5 text-xs font-medium shadow-lg sm:text-sm ${
+            className={`pointer-events-auto max-w-sm rounded-xl border px-4 py-2.5 text-center text-xs font-medium shadow-lg sm:text-left sm:text-sm ${
               t.type === 'success'
                 ? 'border-emerald-500 bg-emerald-600 text-white'
                 : t.type === 'error'
@@ -2766,8 +3820,51 @@ export default function App() {
             }
           }}
           onDeleteLibraryBook={async (bookId) => {
+            if (bookId === SAMPLE_BOOK_ID) {
+              localStorage.setItem('pustakaloka_sample_dismissed', 'true');
+            }
             await LibraryDB.deleteBook(bookId);
-            await refreshLibraryList();
+            const nextMeta = await LibraryDB.listMeta();
+            setLibraryBooks(nextMeta);
+
+            if (bookId === currentBookIdRef.current) {
+              if (nextMeta.length > 0) {
+                const nextBook = await LibraryDB.getBook(nextMeta[0].id);
+                if (nextBook) {
+                  await loadEpubBook(nextBook.data, {
+                    bookId: nextBook.id,
+                    title: nextBook.title,
+                    author: nextBook.author,
+                    isSample: nextBook.isSample,
+                    persist: false,
+                  });
+                }
+              } else {
+                abortActiveChapterTranslation();
+                renditionRef.current = null;
+                if (bookRef.current) {
+                  bookRef.current.destroy();
+                  bookRef.current = null;
+                }
+                if (viewerRef.current) {
+                  viewerRef.current.innerHTML = '';
+                }
+                currentBookIdRef.current = '';
+                currentBookTitleRef.current = 'Belum Ada Buku';
+                currentChapterTitleRef.current = '';
+                currentCfiRef.current = null;
+                currentSpineHrefRef.current = null;
+                chapterCacheRef.current = {};
+                setCurrentBookId('');
+                setCurrentBookTitle('Belum Ada Buku');
+                setCurrentChapterTitle('');
+                setToc([]);
+                setProgressPct(0);
+                setPageLocationLabel('');
+                setHasCachedChapters(false);
+                setChapterPolishStatus('idle');
+              }
+            }
             showToast('Buku dihapus dari PustakaLoka.', 'info');
           }}
           isElectron={isElectron}
@@ -2775,6 +3872,7 @@ export default function App() {
           headerVisible={effectiveChromeVisible}
           onTriggerUpload={() => fileInputRef.current?.click()}
           onLoadSampleBook={async () => {
+            localStorage.removeItem('pustakaloka_sample_dismissed');
             const sampleBuffer = await createSampleEpubBuffer();
             await loadEpubBook(sampleBuffer, {
               bookId: SAMPLE_BOOK_ID,
@@ -2792,8 +3890,11 @@ export default function App() {
           onSelectBookmark={handleSelectBookmark}
           onDeleteBookmark={(id) => {
             const next = bookmarks.filter((b) => b.id !== id);
+            bookmarksRef.current = next;
             setBookmarks(next);
             localStorage.setItem('reader_bookmarks', JSON.stringify(next));
+            deletedBookmarkIdsRef.current = recordDeletedBookmarkId(id);
+            syncService.scheduleBookmarksSync(next, deletedBookmarkIdsRef.current);
             showToast('Penanda dihapus.', 'info');
           }}
           vocabList={vocabList}
@@ -2814,6 +3915,10 @@ export default function App() {
             onScroll={(e) => {
               if (readerFlowRef.current !== 'scroll') return;
               handleScrollMetric(e.currentTarget.scrollTop, outerScrollTrackerRef.current);
+              if (scrollStopSyncTimerRef.current) clearTimeout(scrollStopSyncTimerRef.current);
+              scrollStopSyncTimerRef.current = setTimeout(() => {
+                pushCurrentReadingPositionToSyncRef.current();
+              }, 550);
             }}
             className="fixed inset-0 z-0 flex flex-col items-center overflow-y-auto overscroll-y-contain bg-[var(--bg-reader)] lg:relative lg:inset-auto lg:min-w-0 lg:flex-1 lg:justify-center lg:overflow-hidden"
           >
@@ -2832,42 +3937,94 @@ export default function App() {
               }`}
             />
 
-            {/* Floating Selection Popover */}
-            {popoverPos && (
+            {!currentBookId && !loaderText && (
               <div
-                style={{ left: `${popoverPos.x}px`, top: `${popoverPos.y}px` }}
-                className="mac-surface fixed z-50 flex -translate-x-1/2 items-center gap-1 rounded-2xl border p-1.5 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+                className="absolute inset-0 z-10 flex items-center justify-center p-6"
               >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPopoverPos(null);
-                    handleContextualTranslate(selectedText, false);
-                  }}
-                  className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-700 whitespace-nowrap"
-                >
-                  <Languages className="h-3.5 w-3.5" />
-                  Terjemahkan
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPopoverPos(null);
-                    handleSaveVocab(selectedText);
-                  }}
-                  className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition hover:bg-slate-500/10 whitespace-nowrap"
-                >
-                  <BookmarkPlus className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                  Simpan Kosakata
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPopoverPos(null)}
-                  aria-label="Tutup Menu"
-                  className="rounded-xl p-1.5 text-[var(--text-secondary)] hover:bg-slate-500/10"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                <div className="mac-surface max-w-sm space-y-4 rounded-2xl border p-6 text-center shadow-lg">
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600/10 text-blue-600 dark:text-blue-400">
+                    <BookOpen className="h-6 w-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <h2 className="text-sm font-bold">Pustaka Buku Kosong</h2>
+                    <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+                      Buka file EPUB dari perangkat Anda atau muat kembali buku contoh bawaan.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-blue-700"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      <span>Buka File EPUB</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        localStorage.removeItem('pustakaloka_sample_dismissed');
+                        const sampleBuffer = await createSampleEpubBuffer();
+                        await loadEpubBook(sampleBuffer, {
+                          bookId: SAMPLE_BOOK_ID,
+                          title: 'The Art of Quiet Reading (Buku Contoh)',
+                          author: 'Eleanor Vance',
+                          isSample: true,
+                          persist: true,
+                        });
+                        showToast('Buku contoh bawaan dimuat.', 'info');
+                      }}
+                      className="mac-surface inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold transition hover:bg-slate-500/10"
+                    >
+                      <BookMarked className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                      <span>Muat Buku Contoh</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Fixed Bottom Selection Action Bar (Anti-Overlap with Android System Selection Menu) */}
+            {selectionBar && (
+              <div
+                role="toolbar"
+                aria-label="Aksi Seleksi Teks"
+                onClick={(e) => e.stopPropagation()}
+                className="mac-surface fixed inset-x-0 bottom-0 z-50 border-t border-[var(--border-color)] bg-[var(--bg-surface)] px-3 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] shadow-xl sm:px-4"
+              >
+                <div className="flex w-full items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const text = selectionBar.text;
+                        clearReaderSelection();
+                        handleSaveVocab(text);
+                      }}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-emerald-700 active:scale-[0.98] whitespace-nowrap"
+                    >
+                      <BookmarkPlus className="h-3 w-3" />
+                      <span>Simpan Kosakata</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleBookmarkSelection}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-blue-700 active:scale-[0.98] whitespace-nowrap"
+                    >
+                      <Bookmark className="h-3 w-3" />
+                      <span>Tandai Kalimat Ini</span>
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearReaderSelection}
+                    aria-label="Tutup Aksi Seleksi"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--text-secondary)] hover:bg-slate-500/10"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -3001,6 +4158,48 @@ export default function App() {
         </div>
       </footer>
 
+      {/* Remote Sync Position Resume Banner */}
+      {remotePrompt && (
+        <div
+          role="status"
+          aria-live="polite"
+          onClick={(e) => e.stopPropagation()}
+          className="mac-surface fixed inset-x-3 top-[calc(4rem+env(safe-area-inset-top))] z-40 mx-auto flex max-w-lg items-center justify-between gap-2 rounded-2xl border border-blue-500/40 px-3.5 py-2.5 shadow-xl backdrop-blur-md"
+        >
+          <p className="min-w-0 flex-1 text-xs font-medium leading-snug">
+            Lanjutkan dari posisi terakhir di{' '}
+            <span className="font-semibold">
+              {remotePrompt.position.deviceName || 'perangkat lain'}
+            </span>{' '}
+            (
+            <span className="font-semibold text-blue-600 dark:text-blue-400">
+              {remotePrompt.position.chapterTitle || `Bab ${remotePrompt.position.chapterIndex + 1}`}
+              {typeof remotePrompt.position.paragraphIndex === 'number'
+                ? `, Paragraf ${remotePrompt.position.paragraphIndex}`
+                : ''}
+            </span>
+            )?
+          </p>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void handleAcceptRemotePosition(remotePrompt.position)}
+              className="rounded-xl bg-blue-600 px-3 py-1.5 text-[11px] font-semibold text-white transition hover:bg-blue-700"
+            >
+              Lanjutkan
+            </button>
+            <button
+              type="button"
+              onClick={() => setRemotePrompt(null)}
+              aria-label="Tutup Pemberitahuan Sinkronisasi"
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--text-secondary)] hover:bg-slate-500/10"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Modals */}
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
@@ -3019,6 +4218,17 @@ export default function App() {
             void applyReadingModeToCurrentView(undefined, { autoTranslateIfMissing: false });
           }
         }}
+        syncPassphrase={syncPassphrase}
+        syncChainHash={syncChainHash}
+        syncStatus={syncStatus}
+        syncError={syncError}
+        syncDevices={syncDevices}
+        localDeviceId={localDeviceId}
+        localDeviceName={localDeviceName}
+        onJoinOrCreateSyncChain={handleJoinOrCreateSyncChain}
+        onLeaveSyncChain={handleLeaveSyncChain}
+        onRenameSyncDevice={handleRenameSyncDevice}
+        onRemoveSyncDevice={handleRemoveSyncDevice}
       />
     </div>
   );

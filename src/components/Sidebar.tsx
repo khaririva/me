@@ -206,16 +206,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             <span className="shrink-0">{book.progressPct}%</span>
                           </div>
                         </button>
-                        {!book.isSample && (
-                          <button
-                            type="button"
-                            onClick={() => onDeleteLibraryBook(book.id)}
-                            title="Hapus dari Pustaka"
-                            className="rounded-lg p-1 text-rose-500 opacity-70 transition hover:bg-rose-500/10 hover:opacity-100"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => onDeleteLibraryBook(book.id)}
+                          title="Hapus dari Pustaka"
+                          aria-label={`Hapus ${book.title} dari Pustaka`}
+                          className="rounded-lg p-1 text-rose-500 opacity-70 transition hover:bg-rose-500/10 hover:opacity-100"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     );
                   })}
@@ -257,7 +256,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
               {currentBookBookmarks.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-[var(--border-color)] p-4 text-center text-xs text-[var(--text-secondary)]">
-                  Belum ada penanda tersimpan. Ketuk tombol &ldquo;+ Tambah Penanda&rdquo; di atas untuk menandai posisi baca saat ini.
+                  Belum ada penanda tersimpan. Ketuk dua kali paragraf atau tekan &ldquo;+ Tambah Penanda&rdquo; di atas.
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -278,11 +277,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           <span className="truncate text-xs font-semibold text-blue-600 dark:text-blue-400">
                             {bm.chapterTitle}
                           </span>
-                          {typeof bm.progressPct === 'number' && (
-                            <span className="font-mono-mac shrink-0 rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-blue-600 dark:text-blue-400">
-                              {bm.progressPct}%
-                            </span>
-                          )}
+                          <div className="flex shrink-0 items-center gap-1">
+                            {typeof bm.paragraphIndex === 'number' && (
+                              <span className="font-mono-mac rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-[var(--text-secondary)]">
+                                #{bm.paragraphIndex}
+                              </span>
+                            )}
+                            {typeof bm.progressPct === 'number' && (
+                              <span className="font-mono-mac rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-blue-600 dark:text-blue-400">
+                                {bm.progressPct}%
+                              </span>
+                            )}
+                          </div>
                         </div>
                         {bm.excerpt && (
                           <p className="mt-1 line-clamp-2 text-[11px] leading-snug italic text-[var(--text-primary)]/80">

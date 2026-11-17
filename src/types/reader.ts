@@ -50,6 +50,7 @@ export interface BookmarkItem {
   chapterTitle: string;
   cfi: string;
   href?: string;
+  paragraphIndex?: number;
   progressPct?: number;
   scrollRatio?: number;
   excerpt?: string;
@@ -86,3 +87,34 @@ export interface ToastMessage {
   text: string;
   type: 'info' | 'success' | 'error';
 }
+
+export type SyncConnectionStatus = 'disconnected' | 'connecting' | 'synced' | 'syncing' | 'error';
+
+export type SyncDevicePlatform = 'desktop' | 'mobile';
+
+export interface SyncDeviceInfo {
+  deviceId: string;
+  name: string;
+  platform: SyncDevicePlatform;
+  lastActive: number;
+}
+
+export interface SyncReadingPosition {
+  bookId: string;
+  bookTitle: string;
+  chapterTitle: string;
+  chapterIndex: number;
+  href?: string;
+  cfi: string;
+  paragraphIndex?: number;
+  progressPct: number;
+  scrollRatio?: number;
+  updatedAt: number;
+  deviceId: string;
+  deviceName: string;
+}
+
+export interface RemotePositionPrompt {
+  position: SyncReadingPosition;
+}
+

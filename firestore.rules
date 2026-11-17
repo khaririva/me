@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidChainHash(hash) {
+      return hash is string && hash.size() == 64 && hash.matches('^[a-f0-9]{64}$');
+    }
+
+    function isValidDocId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isValidSyncChainWrite(data, chainHash) {
+      return data.keys().hasAll(['chainHash', 'updatedAt'])
+        && data.keys().hasOnly([
+          'chainHash',
+          'updatedAt',
+          'lastDeviceId',
+          'lastDeviceName',
+          'lastPosition',
+          'positions',
+          'bookmarks',
+          'deletedBookmarkIds',
+          'devices'
+        ])
+        && data.chainHash is string
+        && data.chainHash == chainHash
+        && data.updatedAt is number
+        && (!('lastDeviceId' in data) || (data.lastDeviceId is string && data.lastDeviceId.size() <= 128))
+        && (!('lastDeviceName' in data) || (data.lastDeviceName is string && data.lastDeviceName.size() <= 64))
+        && (!('lastPosition' in data) || data.lastPosition is map)
+        && (!('positions' in data) || data.positions is map)
+        && (!('bookmarks' in data) || (data.bookmarks is list && data.bookmarks.size() <= 500))
+        && (!('deletedBookmarkIds' in data) || data.deletedBookmarkIds is map)
+        && (!('devices' in data) || (data.devices is map && data.devices.size() <= 30));
+    }
+
+    function isValidTranslationWrite(data) {
+      return data.keys().hasAll(['bookId', 'targetLang', 'chapterIndex', 'href', 'stage', 'pairs', 'updatedAt'])
+        && data.keys().hasOnly([
+          'bookId',
+          'bookTitle',
+          'targetLang',
+          'chapterIndex',
+          'href',
+          'stage',
+          'pairs',
+          'updatedAt',
+          'deviceId'
+        ])
+        && data.bookId is string && data.bookId.size() >= 1 && data.bookId.size() <= 160
+        && (!('bookTitle' in data) || (data.bookTitle is string && data.bookTitle.size() <= 240))
+        && data.targetLang is string && data.targetLang.size() >= 1 && data.targetLang.size() <= 64
+        && data.chapterIndex is number && data.chapterIndex >= 0
+        && data.href is string && data.href.size() >= 1 && data.href.size() <= 300
+        && data.stage in ['draft', 'polished']
+        && data.pairs is list && data.pairs.size() <= 2500
+        && data.updatedAt is number
+        && (!('deviceId' in data) || (data.deviceId is string && data.deviceId.size() <= 128));
+    }
+
+    // Accountless Brave-style Sync Chain keyed by secret 256-bit SHA-256 chainHash
+    match /sync_chains/{chainHash} {
+      allow get: if isValidChainHash(chainHash);
+      allow list: if false;
+      allow create, update: if isValidChainHash(chainHash) && isValidSyncChainWrite(request.resource.data, chainHash);
+      allow delete: if false;
+
+      match /translations/{translationId} {
+        allow get: if isValidChainHash(chainHash) && isValidDocId(translationId);
+        allow list: if isValidChainHash(chainHash);
+        allow create, update: if isValidChainHash(chainHash)
+          && isValidDocId(translationId)
+          && isValidTranslationWrite(request.resource.data);
+        allow delete: if false;
+      }
+    }
+  }
+}
